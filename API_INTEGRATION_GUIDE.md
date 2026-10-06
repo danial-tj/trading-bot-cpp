@@ -1,3 +1,5 @@
+> Historical pre-2.0 document. Its feature, build, API, test and performance claims are superseded by [the current README](README.md) and [verified progress](docs/PROGRESS.md). Network adapters are excluded from the offline release.
+
 # API Integration Guide
 
 This guide explains how to use the new API data fetching capabilities in your Trading Bot.
@@ -376,13 +378,3 @@ If you encounter issues:
 5. Check the logs for detailed error information
 
 Happy Trading! 🚀📈
-
-
-
-
-
-
-
-
-
-

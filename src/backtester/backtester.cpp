@@ -1,265 +1,233 @@
 #include "backtester/backtester.h"
 #include <algorithm>
 #include <cmath>
-#include <numeric>
+#include <cstdint>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace TradingBot {
-
-Backtester::Backtester() {}
-
-Backtester::~Backtester() {}
+namespace {
+std::string action(SignalType type) {
+    switch (type) {
+        case SignalType::BUY: return "BUY";
+        case SignalType::SELL: return "SELL";
+        case SignalType::SHORT: return "SHORT";
+        case SignalType::COVER: return "COVER";
+        default: return "HOLD";
+    }
+}
+std::int64_t whole_shares(double quantity) {
+    if (!std::isfinite(quantity) || quantity <= 0 || std::floor(quantity) != quantity ||
+        quantity >= static_cast<double>(std::numeric_limits<std::int64_t>::max()))
+        throw std::invalid_argument("quantity must be positive whole shares within int64 range");
+    return static_cast<std::int64_t>(quantity);
+}
+}
 
 bool Backtester::initialize(const BacktestConfig& config) {
+    if (!std::isfinite(config.initial_capital) || config.initial_capital <= 0 ||
+        !std::isfinite(config.commission_rate) || config.commission_rate < 0 || config.commission_rate > 1 ||
+        !std::isfinite(config.commission_fixed) || config.commission_fixed < 0 ||
+        !std::isfinite(config.slippage) || config.slippage < 0 || config.slippage >= 1 ||
+        config.enable_short_selling || config.symbol.empty()) return false;
+    for (const auto& date : {config.start_date, config.end_date})
+        if (!date.empty() && (date.size() != 10 || !CSVParser::valid_timestamp(date))) return false;
+    if (!config.start_date.empty() && !config.end_date.empty() && config.start_date > config.end_date) return false;
+    try { if (to_cents(config.initial_capital) <= 0) return false; (void)to_cents(config.commission_fixed); }
+    catch (const std::exception&) { return false; }
     config_ = config;
-    
-    
-    if (config.initial_capital <= 0.0) {
-        return false;
-    }
-    
-    if (config.commission_rate < 0.0 || config.commission_rate > 1.0) {
-        return false;
-    }
-    
-    if (config.slippage < 0.0 || config.slippage > 1.0) {
-        return false;
-    }
-    
     return true;
 }
-
 BacktestResults Backtester::run_backtest(std::shared_ptr<Strategy> strategy,
-                                        std::shared_ptr<CSVParser> data_parser,
-                                        std::shared_ptr<RiskManager> risk_manager) {
-    // Initialize results
-    results_ = BacktestResults();
-    
-    if (!strategy || !data_parser || !risk_manager) {
-        throw std::invalid_argument("Null pointer provided to run_backtest");
-    }
-    
-    
+                                        std::shared_ptr<CSVParser> parser,
+                                        std::shared_ptr<RiskManager> risk) {
+    results_ = {};
+    if (!strategy || !parser || !risk) throw std::invalid_argument("strategy, parser and risk manager are required");
+    if (!parser->validate_data()) throw std::invalid_argument("backtest requires nonempty validated market data");
+    if (!initialize(config_)) throw std::invalid_argument("invalid backtest configuration");
+    const auto parameters = strategy->get_parameters();
+    if (!strategy->initialize(parameters)) throw std::invalid_argument("strategy initialization failed");
+    size_t first = 0;
+    while (first < parser->get_data_count() && !config_.start_date.empty() && parser->get_data(first).session_date < config_.start_date) ++first;
+    if (first == parser->get_data_count() || (!config_.end_date.empty() && parser->get_data(first).session_date > config_.end_date))
+        throw std::invalid_argument("selected date range has no market data");
+
+    Ledger ledger(config_.initial_capital, parser->get_data(first).timestamp);
+    results_.initial_cash_cents = ledger.cash_cents();
+    const double initial = from_cents(ledger.cash_cents());
+    results_.equity_curve.push_back(initial);
+    results_.equity_timestamps.push_back(parser->get_data(first).timestamp);
+    Position position;
+    position.symbol = config_.symbol;
     PortfolioState portfolio;
-    portfolio.cash = config_.initial_capital;
-    portfolio.total_value = config_.initial_capital;
-    
-    Position current_position;
-    
-    
-    size_t data_count = data_parser->get_data_count();
-    
-    for (size_t i = 0; i < data_count; ++i) {
-        const MarketData& current_data = data_parser->get_data(i);
-        
-        
-        TradingSignal signal;
-        try {
-            signal = strategy->generate_signal(current_data, current_position);
-        } catch (const std::exception& e) {
-            
-            continue;
+    double peak = initial, daily_start = initial, last_equity = initial, last_mark = parser->get_data(first).open;
+    std::string session;
+    bool daily_locked = false;
+    std::optional<TradingSignal> pending;
+    auto update = [&](double mark) {
+        portfolio.cash = from_cents(ledger.cash_cents());
+        portfolio.quantity = static_cast<double>(ledger.quantity());
+        portfolio.total_value = from_cents(ledger.equity_cents(mark));
+        portfolio.cost_basis = from_cents(ledger.cost_basis_cents());
+        portfolio.realized_pnl = from_cents(ledger.realized_pnl_cents());
+        portfolio.unrealized_pnl = from_cents(ledger.unrealized_pnl_cents(mark));
+        portfolio.current_drawdown = risk->calculate_drawdown(peak, portfolio.total_value);
+        portfolio.max_drawdown = std::max(portfolio.max_drawdown, portfolio.current_drawdown);
+        portfolio.daily_start_value = daily_start;
+        portfolio.daily_loss = risk->calculate_drawdown(daily_start, portfolio.total_value);
+        if (portfolio.daily_loss >= risk->get_risk_parameters().max_daily_loss) daily_locked = true;
+        portfolio.daily_loss_locked = daily_locked;
+        position.quantity = portfolio.quantity;
+        position.avg_price = ledger.average_cost();
+    };
+    auto reject = [&](const TradingSignal& signal, const std::string& now, const std::string& reason) {
+        results_.rejections.push_back({now, action(signal.type), reason, signal.timestamp});
+    };
+    auto generated = [&](const MarketData& bar) {
+        try { return strategy->generate_signal(bar, position); }
+        catch (const std::exception& error) {
+            throw std::runtime_error("strategy " + strategy->get_name() + " failed at " + bar.timestamp + ": " + error.what());
         }
-        
-        
-        if (signal.type != SignalType::HOLD && risk_manager->validate_trade(signal, portfolio)) {
-            
-            
-            double position_size = risk_manager->calculate_position_size(signal, portfolio, current_data);
-            signal.quantity = position_size;
-            
-            
-            Trade trade;
-            execute_trade(trade, signal, current_data, portfolio);
-            
-            
-            risk_manager->update_portfolio_state(portfolio, signal, current_data);
-            
-            
-            if (signal.type == SignalType::BUY) {
-                current_position.quantity += signal.quantity;
-                current_position.avg_price = signal.price; // Simplified - should be weighted average
-                current_position.symbol = "STOCK"; // Simplified - should track actual symbol
-            } else if (signal.type == SignalType::SELL) {
-                current_position.quantity -= signal.quantity;
-                if (current_position.quantity <= 0) {
-                    current_position.quantity = 0.0;
-                    current_position.avg_price = 0.0;
-                }
+    };
+
+    for (size_t i = 0; i < parser->get_data_count(); ++i) {
+        const auto& bar = parser->get_data(i);
+        if (!config_.end_date.empty() && bar.session_date > config_.end_date) break;
+        if (i < first) { (void)generated(bar); continue; }
+        if (session != bar.session_date) {
+            session = bar.session_date;
+            daily_start = last_equity; // Overnight gaps belong to the new trading day.
+            daily_locked = false;
+        }
+        update(bar.open);
+        if (pending) {
+            auto signal = *pending;
+            pending.reset();
+            if (!signal.valid_until.empty() && bar.timestamp >= signal.valid_until) {
+                reject(signal, bar.timestamp, "signal expired before the next available open");
+            } else {
+                // Next-open execution must not read this bar's later high/low/close/volume.
+                // The simulation assumes the provided open is executable; no liquidity model.
+                const bool buy = signal.type == SignalType::BUY;
+                const auto price_cents = to_cents(bar.open * (buy ? 1 + config_.slippage : 1 - config_.slippage));
+                signal.price = from_cents(price_cents);
+                auto reason = risk->rejection_reason(signal, portfolio);
+                if (reason.empty()) {
+                    try {
+                        double desired = signal.quantity;
+                        if (!std::isfinite(desired) || desired < 0) throw std::invalid_argument("quantity must be finite and nonnegative");
+                        if (desired == 0) {
+                            if (buy) {
+                                const long double capacity = static_cast<long double>(ledger.equity_cents(bar.open)) *
+                                    risk->get_risk_parameters().max_position_size;
+                                const auto total_allowed = std::floor((capacity + 0.000001L) / price_cents);
+                                const auto remaining = std::max(0.0L, total_allowed - ledger.quantity());
+                                desired = static_cast<double>(std::min(remaining, static_cast<long double>(ledger.cash_cents() / price_cents)));
+                            } else desired = static_cast<double>(ledger.quantity());
+                            if (buy && desired > 0) {
+                                // Find affordable whole shares using the exact fee rounding
+                                // used by the fill, rather than a floating-point cost estimate.
+                                std::int64_t low = 0, high = whole_shares(desired);
+                                while (low < high) {
+                                    const auto span = high - low;
+                                    const auto middle = low + span / 2 + span % 2;
+                                    const auto value = checked_multiply(price_cents, middle);
+                                    const auto fee = to_cents(config_.commission_fixed + from_cents(value) * config_.commission_rate);
+                                    if (value <= ledger.cash_cents() && fee <= ledger.cash_cents() - value) low = middle;
+                                    else high = middle - 1;
+                                }
+                                desired = static_cast<double>(low);
+                            }
+                        }
+                        const auto quantity = whole_shares(desired);
+                        const auto gross = checked_multiply(price_cents, quantity);
+                        const auto fee = to_cents(config_.commission_fixed + from_cents(gross) * config_.commission_rate);
+                        if (buy) {
+                            const long double exposure = static_cast<long double>(checked_add(ledger.quantity(), quantity)) * price_cents;
+                            const long double capacity = static_cast<long double>(ledger.equity_cents(bar.open)) * risk->get_risk_parameters().max_position_size;
+                            if (exposure > capacity + 0.000001L) throw std::invalid_argument("maximum position size exceeded");
+                        }
+                        const auto before_realized = ledger.realized_pnl_cents();
+                        const auto event = buy ? ledger.buy_cents(quantity, price_cents, fee, bar.timestamp) :
+                                                 ledger.sell_cents(quantity, price_cents, fee, bar.timestamp);
+                        Trade trade;
+                        trade.timestamp = bar.timestamp; trade.signal_timestamp = signal.timestamp;
+                        trade.action = action(signal.type); trade.reason = signal.reason;
+                        trade.price = event.price; trade.quantity = static_cast<double>(quantity);
+                        trade.commission = event.fee; trade.pnl = from_cents(ledger.realized_pnl_cents() - before_realized);
+                        trade.slippage = from_cents(checked_multiply(std::abs(price_cents - to_cents(bar.open)), quantity));
+                        trade.cash_after = from_cents(ledger.cash_cents()); trade.position_after = static_cast<double>(ledger.quantity());
+                        results_.total_slippage += trade.slippage;
+                        results_.trades.push_back(trade);
+                    } catch (const std::invalid_argument& error) { reject(signal, bar.timestamp, error.what()); }
+                    // Overflow and runtime failures abort the run; they are not silently treated as valid no-trade results.
+                } else reject(signal, bar.timestamp, reason);
             }
-            
-            // Record the trade
-            results_.trades.push_back(trade);
         }
-        
-        // Check for risk-based position closures (stop-loss, take-profit)
-        if (current_position.quantity > 0 && 
-            risk_manager->should_close_position(current_position, current_data, portfolio)) {
-            
-            // Create sell signal for position closure
-            TradingSignal close_signal;
-            close_signal.type = SignalType::SELL;
-            close_signal.price = current_data.close;
-            close_signal.quantity = current_position.quantity;
-            close_signal.timestamp = current_data.timestamp;
-            close_signal.reason = "Risk management closure (stop-loss/take-profit)";
-            
-            // Execute the closure trade
-            Trade close_trade;
-            execute_trade(close_trade, close_signal, current_data, portfolio);
-            risk_manager->update_portfolio_state(portfolio, close_signal, current_data);
-            
-            // Reset position
-            current_position.quantity = 0.0;
-            current_position.avg_price = 0.0;
-            
-            // Record the trade
-            results_.trades.push_back(close_trade);
+        update(bar.close);
+        peak = std::max(peak, portfolio.total_value);
+        last_equity = portfolio.total_value;
+        last_mark = bar.close;
+        ledger.mark(bar.close, bar.timestamp);
+        results_.equity_curve.push_back(portfolio.total_value);
+        results_.equity_timestamps.push_back(bar.timestamp);
+
+        auto signal = generated(bar); // Only this completed bar and older bars are visible.
+        signal.timestamp = bar.timestamp;
+        const auto closure = risk->closure_reason(position, bar, portfolio);
+        if (!closure.empty()) {
+            signal.type = SignalType::SELL; signal.price = bar.close; signal.quantity = position.quantity;
+            signal.reason = closure; signal.valid_until.clear();
         }
-        
-        // Update equity curve
-        update_equity_curve(portfolio.total_value);
+        if (signal.type == SignalType::SHORT || signal.type == SignalType::COVER) {
+            reject(signal, bar.timestamp, "short execution is disabled; signal retained for analysis");
+        } else if (signal.type != SignalType::HOLD) {
+            pending = signal;
+        }
     }
-    
-    // Calculate final statistics
+    if (pending) reject(*pending, pending->timestamp, "no next bar available; final signal cancelled");
+    results_.final_cash_cents = ledger.cash_cents();
+    results_.final_equity_cents = ledger.equity_cents(last_mark);
+    results_.cost_basis_cents = ledger.cost_basis_cents();
+    results_.realized_pnl_cents = ledger.realized_pnl_cents();
+    results_.unrealized_pnl_cents = ledger.unrealized_pnl_cents(last_mark);
+    results_.total_fees_cents = ledger.fees_cents();
+    results_.final_cash = from_cents(results_.final_cash_cents);
+    results_.final_equity = from_cents(results_.final_equity_cents);
+    results_.final_quantity = static_cast<double>(ledger.quantity());
+    results_.cost_basis = from_cents(results_.cost_basis_cents);
+    results_.realized_pnl = from_cents(results_.realized_pnl_cents);
+    results_.unrealized_pnl = from_cents(results_.unrealized_pnl_cents);
+    results_.total_fees = from_cents(results_.total_fees_cents);
+    results_.events = ledger.events();
     calculate_statistics();
-    
     return results_;
 }
-
-const BacktestConfig& Backtester::get_config() const {
-    return config_;
-}
-
+const BacktestConfig& Backtester::get_config() const { return config_; }
 void Backtester::set_config(const BacktestConfig& config) {
-    config_ = config;
+    if (!initialize(config)) throw std::invalid_argument("invalid backtest configuration");
 }
-
-const BacktestResults& Backtester::get_results() const {
-    return results_;
-}
-
-// Private helper methods
-
-void Backtester::execute_trade(Trade& trade, const TradingSignal& signal, 
-                              const MarketData& data, PortfolioState& portfolio) {
-    // Fill trade details
-    trade.timestamp = signal.timestamp;
-    trade.price = signal.price;
-    trade.quantity = signal.quantity;
-    
-    // Apply slippage
-    if (signal.type == SignalType::BUY) {
-        trade.action = "BUY";
-        trade.price *= (1.0 + config_.slippage); // Buy at higher price
-    } else if (signal.type == SignalType::SELL) {
-        trade.action = "SELL";
-        trade.price *= (1.0 - config_.slippage); // Sell at lower price
-    }
-    
-    // Calculate commission
-    double trade_value = trade.price * trade.quantity;
-    trade.commission = trade_value * config_.commission_rate;
-    
-    // TODO: Calculate P&L for the trade
-    // For now, set to 0 - will be calculated in statistics
-    trade.pnl = 0.0;
-}
-
-void Backtester::update_equity_curve(double current_value) {
-    results_.equity_curve.push_back(current_value);
-}
-
+const BacktestResults& Backtester::get_results() const { return results_; }
 void Backtester::calculate_statistics() {
-    if (results_.trades.empty()) {
-        return; // No trades to analyze
-    }
-    
-    // TODO: Implement comprehensive statistics calculation
-    // 1. Calculate total return
-    // 2. Calculate win rate
-    // 3. Calculate Sharpe ratio
-    // 4. Calculate maximum drawdown
-    // 5. Calculate profit factor
-    
     results_.total_trades = static_cast<int>(results_.trades.size());
-    
-    // Count winning and losing trades
+    double wins = 0, losses = 0;
     for (const auto& trade : results_.trades) {
-        if (trade.pnl > 0) {
-            results_.winning_trades++;
-        } else if (trade.pnl < 0) {
-            results_.losing_trades++;
-        }
+        if (trade.action != "SELL") continue;
+        ++results_.closed_trades; // A closed trade means each realized SELL fill, including partial exits.
+        if (trade.pnl > 0) { ++results_.winning_trades; wins += trade.pnl; }
+        else if (trade.pnl < 0) { ++results_.losing_trades; losses -= trade.pnl; }
     }
-    
-    // Calculate win rate
-    if (results_.total_trades > 0) {
-        results_.win_rate = static_cast<double>(results_.winning_trades) / results_.total_trades;
+    results_.win_rate = results_.closed_trades ? static_cast<double>(results_.winning_trades) / results_.closed_trades : 0;
+    results_.avg_win = results_.winning_trades ? wins / results_.winning_trades : 0;
+    results_.avg_loss = results_.losing_trades ? losses / results_.losing_trades : 0;
+    if (losses > 0) results_.profit_factor = wins / losses;
+    const double initial = from_cents(results_.initial_cash_cents);
+    results_.total_return = (results_.final_equity - initial) / initial;
+    double peak = initial;
+    for (const auto value : results_.equity_curve) {
+        peak = std::max(peak, value);
+        results_.max_drawdown = std::max(results_.max_drawdown, (peak - value) / peak);
     }
-    
-    // Calculate total return
-    if (!results_.equity_curve.empty() && config_.initial_capital > 0) {
-        double final_value = results_.equity_curve.back();
-        results_.total_return = (final_value - config_.initial_capital) / config_.initial_capital;
-    }
-    
-    // Calculate maximum drawdown
-    if (!results_.equity_curve.empty()) {
-        results_.max_drawdown = calculate_max_drawdown(results_.equity_curve);
-    }
-    
-    // TODO: Calculate additional metrics
-    // - Annualized return
-    // - Sharpe ratio
-    // - Average win/loss
-    // - Profit factor
 }
-
-double Backtester::calculate_sharpe_ratio(const std::vector<double>& returns) {
-    if (returns.size() < 2) {
-        return 0.0;
-    }
-    
-    // Calculate mean return
-    double mean_return = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
-    
-    // Calculate standard deviation
-    double variance = 0.0;
-    for (double ret : returns) {
-        variance += std::pow(ret - mean_return, 2);
-    }
-    variance /= (returns.size() - 1);
-    double std_dev = std::sqrt(variance);
-    
-    if (std_dev == 0.0) {
-        return 0.0;
-    }
-    
-    // Assume risk-free rate of 0 for simplicity
-    return mean_return / std_dev;
 }
-
-double Backtester::calculate_max_drawdown(const std::vector<double>& equity_curve) {
-    if (equity_curve.empty()) {
-        return 0.0;
-    }
-    
-    double max_drawdown = 0.0;
-    double peak = equity_curve[0];
-    
-    for (double value : equity_curve) {
-        if (value > peak) {
-            peak = value;
-        }
-        
-        double drawdown = (peak - value) / peak;
-        if (drawdown > max_drawdown) {
-            max_drawdown = drawdown;
-        }
-    }
-    
-    return max_drawdown;
-}
-
-} // namespace TradingBot

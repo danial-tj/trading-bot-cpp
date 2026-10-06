@@ -1,104 +1,30 @@
 #include "strategy/strategy.h"
-#include <stdexcept>
-#include <iostream>
+#include "strategy_detail.h"
 
-
-TradingBot::EMAStrategy::EMAStrategy() : Strategy("EMA_STRATEGY") {
-    //Common EMA periods used in MACD indicator
-    short_period_ = 12;
-    long_period_ = 26 ;
-    
-}
-
-
-bool TradingBot::EMAStrategy::initialize(const std::map<std::string, double>& params) {
-    auto short_period_it = params.find("short_period");
-    auto long_period_it = params.find("long_period");
-
-    if(short_period_it == params.end() || long_period_it == params.end()){
-        return false;
-    }
-
-    short_period_ = static_cast<int>(short_period_it->second);
-    long_period_ = static_cast<int>(long_period_it->second);
-
-    
+namespace TradingBot {
+EMAStrategy::EMAStrategy() : Strategy("EMA_STRATEGY") { initialize({{"short_period", 12}, {"long_period", 26}}); }
+bool EMAStrategy::initialize(const std::map<std::string, double>& params) {
+    if (!validate_parameters(params)) return false;
+    short_ema_.reset(static_cast<int>(params.at("short_period")));
+    long_ema_.reset(static_cast<int>(params.at("long_period")));
+    parameters_ = params;
+    previous_difference_ = 0.0; previous_ready_ = false;
     return true;
 }
-
-
-TradingBot::TradingSignal TradingBot::EMAStrategy::generate_signal(const MarketData& data, const Position& current_position) {    
-    TradingSignal signal;
-    signal.type = SignalType::HOLD;
-    signal.price = data.close;
-    signal.timestamp = data.timestamp;
-    signal.reason = "EMA strategy not implemented yet";
-
-    price_history_.push_back(data);
-
-    if (price_history_.size() < static_cast<size_t>(long_period_)) {
-        return signal;
-    }
-
-    double short_ema = calculate_ema(price_history_, short_period_);
-    double long_ema = calculate_ema(price_history_, long_period_);
-
-    if(price_history_.size() > static_cast<size_t>(long_period_)){
-
-        std::vector<MarketData> prev_data(price_history_.begin(), price_history_.end() - 1);
-
-        double prev_short_ema = calculate_ema(prev_data, short_period_);
-        double prev_long_ema = calculate_ema(prev_data, long_period_);
-
-        if(prev_short_ema <= prev_long_ema && short_ema > long_ema){
-            signal.type = SignalType::BUY;
-            signal.price = data.close;
-            signal.quantity = 100.0;
-            signal.reason = "Short EMA crossed above long EMA";
-        }
-        else if(prev_short_ema >= prev_long_ema && short_ema < long_ema){
-            signal.type = SignalType::SELL;
-            signal.price = data.close;
-            signal.quantity = current_position.quantity;
-            signal.reason = "Short EMA crossed below long EMA";
-        }
-        else{
-            signal.reason = "No crossover detected";
-        }
-    }
-    
+TradingSignal EMAStrategy::generate_signal(const MarketData& data, const Position& position) {
+    if (!StrategyDetail::valid_close(data)) return StrategyDetail::hold(data, "Invalid close");
+    short_ema_.push(data.close); long_ema_.push(data.close);
+    if (!long_ema_.ready()) return StrategyDetail::hold(data, "EMA warmup");
+    double difference = short_ema_.value - long_ema_.value;
+    auto signal = previous_ready_ ? StrategyDetail::crossover(data, position, previous_difference_, difference, "EMA")
+                                  : StrategyDetail::hold(data, "EMA crossover warmup");
+    previous_difference_ = difference; previous_ready_ = true;
     return signal;
 }
-
-
-std::map<std::string, double> TradingBot::EMAStrategy::get_parameters() const {
-    
-    return std::map<std::string, double> {
-        {"short_period", static_cast<double>(short_period_)},
-        {"long_period", static_cast<double>(long_period_)}
-    };
-        
+std::map<std::string, double> EMAStrategy::get_parameters() const {
+    return {{"short_period", short_ema_.period}, {"long_period", long_ema_.period}};
 }
-
-bool TradingBot::EMAStrategy::validate_parameters(const std::map<std::string, double>& params) const {
-    auto short_period_it = params.find("short_period");
-    auto long_period_it = params.find("long_period");
-
-    if(short_period_it == params.end() || long_period_it == params.end()){
-        return false;
-    }
-
-    if(short_period_it->second <= 1 || short_period_it->second > 50){
-        return false;
-    }
-
-    if(long_period_it->second <= 9 || long_period_it->second > 200){
-        return false;
-    }
-
-    if(short_period_it->second >= long_period_it->second){
-        return false;
-    }
-    
-    return true;
+bool EMAStrategy::validate_parameters(const std::map<std::string, double>& params) const {
+    return StrategyDetail::crossover_parameters(params);
 }
+} // namespace TradingBot

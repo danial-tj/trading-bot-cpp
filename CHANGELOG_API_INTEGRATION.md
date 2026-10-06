@@ -1,3 +1,5 @@
+> Historical pre-2.0 document. Its feature, build, API, test and performance claims are superseded by [the current README](README.md) and [verified progress](docs/PROGRESS.md). Network adapters are excluded from the offline release.
+
 # Changelog: API Integration Feature
 
 ## Summary
@@ -371,13 +373,3 @@ We welcome contributions! Areas for improvement:
 **Version**: 2.0.0  
 **Last Updated**: October 7, 2024  
 **Status**: ✅ Stable & Production Ready
-
-
-
-
-
-
-
-
-
-

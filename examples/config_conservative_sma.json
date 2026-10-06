@@ -1,77 +1,11 @@
 {
-    "trading_bot": {
-        "name": "Conservative_SMA_Bot",
-        "version": "1.0.0",
-        "description": "Conservative SMA crossover strategy for stable returns"
-    },
-    
-    "backtesting": {
-        "initial_capital": 100000.0,
-        "commission_rate": 0.001,
-        "slippage": 0.0001,
-        "enable_short_selling": false,
-        "start_date": "2018-01-01",
-        "end_date": "2023-12-31"
-    },
-    
-    "risk_management": {
-        "max_position_size": 0.01,
-        "max_drawdown": 0.15,
-        "stop_loss_pct": 0.02,
-        "take_profit_pct": 0.08,
-        "max_daily_loss": 0.03,
-        "position_sizing_atr": 1.5
-    },
-    
-    "strategies": {
-        "SMA_CROSSOVER": {
-            "short_period": 50,
-            "long_period": 200,
-            "description": "Classic Golden Cross/Death Cross strategy"
-        }
-    },
-    
-    "logging": {
-        "log_file": "./logs/conservative_sma_bot.log",
-        "min_level": "INFO",
-        "console_output": true,
-        "file_output": true,
-        "timestamp": true,
-        "max_file_size_mb": 10
-    },
-    
-    "reporting": {
-        "output_format": "HTML",
-        "output_directory": "./reports/conservative_sma",
-        "include_charts": true,
-        "include_trade_details": true,
-        "chart_format": "PNG"
-    },
-    
-    "data": {
-        "csv_format": {
-            "timestamp_column": "timestamp",
-            "open_column": "open",
-            "high_column": "high",
-            "low_column": "low",
-            "close_column": "close",
-            "volume_column": "volume",
-            "date_format": "%Y-%m-%d %H:%M:%S"
-        },
-        "validation": {
-            "check_missing_values": true,
-            "check_price_consistency": true,
-            "min_volume": 0.0
-        }
-    },
-    
-    "api": {
-        "default_provider": "yahoo_finance",
-        "default_symbol": "SPY",
-        "default_interval": "daily",
-        "cache_enabled": true,
-        "auto_save_csv": true,
-        "csv_output_directory": "./data/conservative_sma"
+  "risk_management": {
+    "max_position_size": 0.05
+  },
+  "strategies": {
+    "SMA_CROSSOVER": {
+      "short_period": 10,
+      "long_period": 30
     }
+  }
 }
-

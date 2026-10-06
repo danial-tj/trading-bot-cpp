@@ -1,423 +1,111 @@
 #include "trading_bot.h"
-#include "utils/logger.h"
 #include <fstream>
+#include <cmath>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
-#include <iostream>
-
-
-#include <map>
-#include <string>
-
+#ifndef TRADING_BOT_COMMIT
+#define TRADING_BOT_COMMIT "unknown"
+#endif
+#ifndef TRADING_BOT_SOURCE_SHA256
+#define TRADING_BOT_SOURCE_SHA256 "unknown"
+#endif
 namespace TradingBot {
-
-TradingBot::TradingBot() : api_enabled_(false) {
-    // Initialize all component pointers to nullptr
-    // They will be created during initialization
+namespace {
+std::string fingerprint(const std::string& filename) {
+    std::ifstream input(filename, std::ios::binary);
+    if (!input) throw std::runtime_error("Cannot fingerprint dataset");
+    std::uint64_t hash = 14695981039346656037ULL;
+    char byte;
+    while (input.get(byte)) { hash ^= static_cast<unsigned char>(byte); hash *= 1099511628211ULL; }
+    if (!input.eof()) throw std::runtime_error("Failed to read dataset for fingerprint");
+    std::ostringstream out; out << std::hex << std::setw(16) << std::setfill('0') << hash; return out.str();
 }
-
-TradingBot::~TradingBot() {
-    // Unique pointers automatically clean up
-}
-
-bool TradingBot::initialize(const std::string& config_file) {
-    try {        
-        // Load configuration first
-        if (!load_configuration(config_file)) {
-            LOG_WARNING("Using default configuration due to config load failure");
-        }
-        
-        // Initialize CSV Parser
-        csv_parser_ = std::make_unique<CSVParser>();
-        
-        // Initialize API Data Fetcher
-        api_fetcher_ = std::make_unique<APIDataFetcher>();
-        std::map<std::string, std::string> api_config;
-        
-        // Try to get API key from config
-        if (config_data_.find("api") != config_data_.end()) {
-            auto& api_settings = config_data_["api"];
-            if (api_settings.find("alpha_vantage_key") != api_settings.end()) {
-                api_config["alpha_vantage_key"] = api_settings["alpha_vantage_key"];
+Json benchmark(const CSVParser& parser, const BacktestConfig& config) {
+    Ledger ledger(config.initial_capital);
+    std::vector<double> curve{from_cents(ledger.cash_cents())};
+    bool started = false;
+    double last = 0;
+    for (size_t i = 0; i < parser.get_data_count(); ++i) {
+        const auto& bar = parser.get_data(i);
+        const auto date = bar.timestamp.substr(0, 10);
+        if ((!config.start_date.empty() && date < config.start_date) || (!config.end_date.empty() && date > config.end_date)) continue;
+        if (!started) {
+            started = true;
+            const double price = from_cents(to_cents(bar.open * (1 + config.slippage)));
+            if (price <= 0) throw std::invalid_argument("Buy-and-hold opening price rounds to zero cents");
+            std::int64_t low = 0, high = ledger.cash_cents() / to_cents(price);
+            while (low < high) {
+                const auto candidate = low + (high - low + 1) / 2;
+                const auto gross = checked_multiply(to_cents(price), candidate);
+                const auto fee = to_cents(from_cents(gross) * config.commission_rate + config.commission_fixed);
+                if (checked_add(gross, fee) <= ledger.cash_cents()) low = candidate;
+                else high = candidate - 1;
+            }
+            if (low > 0) {
+                const auto gross = checked_multiply(to_cents(price), low);
+                ledger.buy_cents(low, to_cents(price), to_cents(from_cents(gross) * config.commission_rate + config.commission_fixed), bar.timestamp);
             }
         }
-        
-        if (api_fetcher_->initialize(api_config)) {
-            // Default to Yahoo Finance if no API key provided
-            api_fetcher_->set_provider(APIProvider::YAHOO_FINANCE);
-            api_enabled_ = true;
-            LOG_INFO("API data fetcher initialized successfully");
-        } else {
-            LOG_WARNING("API data fetcher initialization failed");
-            api_enabled_ = false;
-        }
-        
-        // Initialize Risk Manager with loaded or default parameters
-        risk_manager_ = std::make_unique<RiskManager>();
-        RiskParameters risk_params = load_risk_parameters();
-        if (!risk_manager_->initialize(risk_params)) {
-            LOG_ERROR("Failed to initialize Risk Manager");
-            return false;
-        }
-        
-        // Initialize Backtester with loaded or default configuration
-        backtester_ = std::make_unique<Backtester>();
-        BacktestConfig backtest_config = load_backtest_config();
-        if (!backtester_->initialize(backtest_config)) {
-            LOG_ERROR("Failed to initialize Backtester");
-            return false;
-        }
-        
-        // Initialize Report Generator (placeholder for now)
-        // report_generator_ = std::make_unique<ReportGenerator>();
-        
-        LOG_INFO("TradingBot initialized successfully");
-        return true;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to initialize TradingBot: " + std::string(e.what()));
-        return false;
+        last = bar.close;
+        curve.push_back(from_cents(ledger.equity_cents(last)));
     }
+    if (!started) return nullptr;
+    return {{"name","Buy and hold"}, {"equity_curve",curve}, {"final_equity",curve.back()},
+        {"total_return",curve.back() / curve.front() - 1}, {"quantity",ledger.quantity()},
+        {"fees",from_cents(ledger.fees_cents())},
+        {"assumption","Precommitted purchase at first in-range open, maximum affordable whole shares, same entry fees/slippage, hold through final close. No allocation cap or exit fee; exposure differs from strategy."}};
 }
-
+}
+bool TradingBot::initialize(const std::string& config_file) {
+    initialized_ = false;
+    error_.clear(); report_ = nullptr;
+    try { config_ = read_configuration(config_file); initialized_ = true; return true; }
+    catch (const std::exception& e) { error_ = e.what(); return false; }
+}
 bool TradingBot::run_backtest(const std::string& data_file, const std::string& strategy_name) {
+    error_.clear(); report_ = nullptr; results_ = BacktestResults{};
     try {
-        
-        if (!csv_parser_->load_data(data_file)) {
-            LOG_ERROR("Failed to load data from: " + data_file);
-            return false;
-        }
-        
-        if (!csv_parser_->validate_data()) {
-            LOG_ERROR("Data validation failed for: " + data_file);
-            return false;
-        }
-        
-        LOG_INFO("Loaded " + std::to_string(csv_parser_->get_data_count()) + " rows of market data");
-        
-        
-        strategy_ = create_strategy(strategy_name);
-        if (!strategy_) {
-            LOG_ERROR("Failed to create strategy: " + strategy_name);
-            return false;
-        }
-        
-        // Initialize strategy with default parameters
-        auto strategy_params = get_strategy_parameters(strategy_name);
-        if (!strategy_->initialize(strategy_params)) {
-            LOG_ERROR("Failed to initialize strategy: " + strategy_name);
-            return false;
-        }
-        
-        LOG_INFO("Initialized strategy: " + strategy_name);
-        
-        
-        results_ = backtester_->run_backtest(
-            std::shared_ptr<Strategy>(strategy_.release()),
-            std::shared_ptr<CSVParser>(csv_parser_.release()),
-            std::shared_ptr<RiskManager>(risk_manager_.release())
-        );
-        
-        LOG_INFO("Backtest completed successfully");
-        LOG_INFO("Total trades: " + std::to_string(results_.total_trades));
-        LOG_INFO("Total return: " + std::to_string(results_.total_return * 100) + "%");
-        
+        if (!initialized_) throw std::logic_error("Initialize the simulator before running");
+        const auto input_fingerprint = fingerprint(data_file);
+        auto parser = std::make_shared<CSVParser>();
+        if (!parser->load_data(data_file)) throw std::invalid_argument(parser->get_last_error());
+        const auto name = canonical_strategy(strategy_name);
+        auto strategy = make_strategy(name);
+        if (!strategy->initialize(config_.strategies.at(name))) throw std::invalid_argument("Strategy initialization failed");
+        auto risk = std::make_shared<RiskManager>();
+        if (!risk->initialize(config_.risk)) throw std::invalid_argument("Risk initialization failed");
+        Backtester engine;
+        if (!engine.initialize(config_.backtest)) throw std::invalid_argument("Backtest initialization failed");
+        results_ = engine.run_backtest(strategy, parser, risk);
+        if (fingerprint(data_file) != input_fingerprint) throw std::runtime_error("Dataset changed during the run; retry with an immutable input");
+        report_ = {{"schema_version",1}, {"engine_version","2.0.0"}, {"engine_commit",TRADING_BOT_COMMIT},
+            {"engine_source_sha256",TRADING_BOT_SOURCE_SHA256},
+            {"dataset_fingerprint",{{"algorithm","fnv1a64"},{"value",input_fingerprint}}},
+            {"strategy",name}, {"effective_config",config_.effective}, {"bar_count",parser->get_data_count()},
+            {"assumptions", {"Offline simulation; one asset, one nominal currency; whole shares; no borrowing.",
+                "Signals use completed bars; eligible orders fill at the next observed open with slippage and fees.",
+                "Stops and take-profit use completed closes; gaps can exceed their thresholds.",
+                "Open holdings remain marked at the final close; no fabricated liquidation.",
+                "Cash, fees, prices and cost basis use checked signed 64-bit cents; indicators use floating point.",
+                "Amounts round half away from zero. Entry fees are included in cost basis; partial exits allocate basis proportionally in cents.",
+                "The next quoted open is assumed executable; no liquidity or volume participation model. Later execution-bar HLCV is never used to qualify its opening fill.",
+                "Intraday timestamps denote bar opens in exchange-local time; CSV must contain correctly normalized regular-session history.",
+                "Bearish VWAP signals are research only; short execution is disabled."}},
+            {"results", results_to_json(results_)}, {"benchmark",benchmark(*parser,config_.backtest)}};
         return true;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Backtest failed: " + std::string(e.what()));
-        return false;
-    }
+    } catch (const std::exception& e) { error_ = e.what(); return false; }
 }
-
-void TradingBot::generate_report(const std::string& output_file) {
-    try {
-        // TODO: Use ReportGenerator when implemented
-        
-        std::ofstream report(output_file);
-        if (!report.is_open()) {
-            LOG_ERROR("Failed to create report file: " + output_file);
-            return;
-        }
-        
-        
-        report << "<!DOCTYPE html>\n";
-        report << "<html><head><title>Trading Bot Backtest Report</title></head>\n";
-        report << "<body>\n";
-        report << "<h1>Backtest Results</h1>\n";
-        report << "<table border='1'>\n";
-        report << "<tr><th>Metric</th><th>Value</th></tr>\n";
-        report << "<tr><td>Total Return</td><td>" << (results_.total_return * 100) << "%</td></tr>\n";
-        report << "<tr><td>Annualized Return</td><td>" << (results_.annualized_return * 100) << "%</td></tr>\n";
-        report << "<tr><td>Sharpe Ratio</td><td>" << results_.sharpe_ratio << "</td></tr>\n";
-        report << "<tr><td>Max Drawdown</td><td>" << (results_.max_drawdown * 100) << "%</td></tr>\n";
-        report << "<tr><td>Win Rate</td><td>" << (results_.win_rate * 100) << "%</td></tr>\n";
-        report << "<tr><td>Total Trades</td><td>" << results_.total_trades << "</td></tr>\n";
-        report << "<tr><td>Winning Trades</td><td>" << results_.winning_trades << "</td></tr>\n";
-        report << "<tr><td>Losing Trades</td><td>" << results_.losing_trades << "</td></tr>\n";
-        report << "<tr><td>Profit Factor</td><td>" << results_.profit_factor << "</td></tr>\n";
-        report << "</table>\n";
-        report << "</body></html>\n";
-        
-        report.close();
-        LOG_INFO("Report generated: " + output_file);
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to generate report: " + std::string(e.what()));
-    }
+void TradingBot::generate_report(const std::string& output_file) const {
+    if (report_.is_null()) throw std::logic_error("No successful result to save");
+    std::ofstream out(output_file, std::ios::binary);
+    if (!out || !(out << report_.dump(2) << '\n')) throw std::runtime_error("Cannot write report: " + output_file);
 }
-
-const BacktestResults& TradingBot::get_results() const {
-    return results_;
+bool TradingBot::run_backtest_with_api(const std::string&, const std::string&, const std::string&, const std::string&, DataInterval) {
+    error_ = "Network adapters are disabled in the offline simulator; provide a validated CSV."; return false;
 }
-
-bool TradingBot::run_backtest_with_api(
-    const std::string& symbol,
-    const std::string& strategy_name,
-    const std::string& start_date,
-    const std::string& end_date,
-    DataInterval interval) {
-    
-    try {
-        if (!api_enabled_ || !api_fetcher_) {
-            LOG_ERROR("API data fetcher is not available");
-            return false;
-        }
-        
-        LOG_INFO("Fetching market data for " + symbol + " from " + start_date + " to " + end_date);
-        
-        // Fetch data from API
-        APIResponse response = api_fetcher_->fetch_data(symbol, interval, start_date, end_date);
-        
-        if (!response.success || response.data.empty()) {
-            LOG_ERROR("Failed to fetch data from API: " + response.error_message);
-            return false;
-        }
-        
-        LOG_INFO("Successfully fetched " + std::to_string(response.data.size()) + " data points");
-        
-        // Save to temporary CSV file
-        std::string temp_csv = "temp_" + symbol + "_data.csv";
-        if (!api_fetcher_->save_to_csv(response, temp_csv)) {
-            LOG_ERROR("Failed to save API data to CSV");
-            return false;
-        }
-        
-        LOG_INFO("Data saved to: " + temp_csv);
-        
-        // Run backtest with the fetched data
-        bool result = run_backtest(temp_csv, strategy_name);
-        
-        // Optionally, keep the CSV file for future use
-        // You can delete it here if you want: std::remove(temp_csv.c_str());
-        
-        return result;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("API backtest failed: " + std::string(e.what()));
-        return false;
-    }
+bool TradingBot::fetch_market_data(const std::string&, const std::string&, const std::string&, const std::string&, DataInterval) {
+    error_ = "Network adapters are disabled in the offline simulator."; return false;
 }
-
-bool TradingBot::fetch_market_data(
-    const std::string& symbol,
-    const std::string& start_date,
-    const std::string& end_date,
-    const std::string& output_file,
-    DataInterval interval) {
-    
-    try {
-        if (!api_enabled_ || !api_fetcher_) {
-            LOG_ERROR("API data fetcher is not available");
-            return false;
-        }
-        
-        LOG_INFO("Fetching market data for " + symbol);
-        
-        // Fetch data from API
-        APIResponse response = api_fetcher_->fetch_data(symbol, interval, start_date, end_date);
-        
-        if (!response.success || response.data.empty()) {
-            LOG_ERROR("Failed to fetch data: " + response.error_message);
-            return false;
-        }
-        
-        LOG_INFO("Successfully fetched " + std::to_string(response.data.size()) + " data points");
-        
-        // Save to file
-        if (!api_fetcher_->save_to_csv(response, output_file)) {
-            LOG_ERROR("Failed to save data to: " + output_file);
-            return false;
-        }
-        
-        LOG_INFO("Data saved to: " + output_file);
-        return true;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to fetch market data: " + std::string(e.what()));
-        return false;
-    }
+bool TradingBot::set_api_provider(APIProvider) { error_ = "Network adapters are disabled."; return false; }
 }
-
-bool TradingBot::set_api_provider(APIProvider provider) {
-    if (!api_enabled_ || !api_fetcher_) {
-        LOG_ERROR("API data fetcher is not available");
-        return false;
-    }
-    
-    if (api_fetcher_->set_provider(provider)) {
-        LOG_INFO("API provider changed successfully");
-        return true;
-    }
-    
-    LOG_ERROR("Failed to change API provider");
-    return false;
-}
-
-// Private helper methods
-
-std::unique_ptr<Strategy> TradingBot::create_strategy(const std::string& strategy_name) {
-    // Factory method to create different strategy types
-    
-    if (strategy_name == "SMA_CROSSOVER" || strategy_name == "SMA") {
-        return std::make_unique<SMACrossoverStrategy>();
-        
-    } else if (strategy_name == "EMA_CROSSOVER" || strategy_name == "EMA") {
-        return std::make_unique<EMAStrategy>();
-        
-    } else if (strategy_name == "RSI" || strategy_name == "RSI_STRATEGY") {
-        return std::make_unique<RSIStrategy>();
-        
-    } else {
-        LOG_ERROR("Unknown strategy name: " + strategy_name);
-        LOG_INFO("Available strategies: SMA_CROSSOVER, EMA_CROSSOVER, RSI");
-        return nullptr;
-    }
-}
-
-std::map<std::string, double> TradingBot::get_strategy_parameters(const std::string& strategy_name) {
-    std::map<std::string, double> params;
-    
-    // Start with default parameters for each strategy type
-    if (strategy_name == "SMA_CROSSOVER" || strategy_name == "SMA") {
-        params = {
-            {"short_period", 10.0},
-            {"long_period", 30.0}
-        };
-        
-    } else if (strategy_name == "EMA_CROSSOVER" || strategy_name == "EMA") {
-        params = {
-            {"short_period", 12.0},
-            {"long_period", 26.0}
-        };
-        
-    } else if (strategy_name == "RSI" || strategy_name == "RSI_STRATEGY") {
-        params = {
-            {"rsi_period", 14.0},
-            {"overbought_threshold", 70.0},
-            {"oversold_threshold", 30.0}
-        };
-        
-    } else {
-        LOG_ERROR("Unknown strategy name: " + strategy_name);
-        LOG_INFO("Available strategies: SMA_CROSSOVER, EMA_CROSSOVER, RSI");
-        return {};
-    }
-    
-    LOG_INFO("Loaded parameters for strategy: " + strategy_name);
-    return params;
-}
-
-bool TradingBot::load_configuration(const std::string& config_file) {
-    try {
-        std::ifstream file(config_file);
-        if (!file.is_open()) {
-            LOG_WARNING("Config file not found, using default configuration: " + config_file);
-            return true; // Use defaults
-        }
-        
-        // Read entire config file
-        std::string config_content((std::istreambuf_iterator<char>(file)),
-                                   std::istreambuf_iterator<char>());
-        file.close();
-        
-        // Simple JSON-like parsing (basic implementation)
-        config_data_ = parse_simple_json(config_content);
-        
-        LOG_INFO("Configuration loaded from: " + config_file);
-        return true;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to load configuration: " + std::string(e.what()));
-        return false;
-    }
-}
-
-RiskParameters TradingBot::load_risk_parameters() {
-    RiskParameters params; // Start with defaults
-    
-    // For now, just use default values
-    // TODO: Add proper JSON config parsing later
-    
-    LOG_INFO("Loaded risk parameters with default values");
-    return params;
-}
-
-BacktestConfig TradingBot::load_backtest_config() {
-    BacktestConfig config; // Start with defaults
-    
-    // For now, just use default values
-    // TODO: Add proper JSON config parsing later
-    
-    LOG_INFO("Loaded backtest config with default values");
-    return config;
-}
-
-std::map<std::string, std::map<std::string, std::string>> TradingBot::parse_simple_json(const std::string& json_content) {
-    std::map<std::string, std::map<std::string, std::string>> result;
-    
-    // Simple JSON parser for basic key-value pairs
-    // This is a basic implementation - for production we shoulduse a proper JSON library
-    
-    std::string current_section;
-    std::istringstream iss(json_content);
-    std::string line;
-    
-    while (std::getline(iss, line)) {
-        // Remove whitespace
-        line.erase(0, line.find_first_not_of(" \t"));
-        line.erase(line.find_last_not_of(" \t") + 1);
-        
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '/' || line[0] == '{' || line[0] == '}') {
-            continue;
-        }
-        
-        // Check for section header (e.g., "risk_management": {)
-        if (line.find("\":") != std::string::npos && line.find("{") != std::string::npos) {
-            size_t start = line.find("\"") + 1;
-            size_t end = line.find("\"", start);
-            current_section = line.substr(start, end - start);
-            continue;
-        }
-        
-        // Parse key-value pairs
-        if (line.find(":") != std::string::npos && !current_section.empty()) {
-            size_t colon = line.find(":");
-            std::string key = line.substr(0, colon);
-            std::string value = line.substr(colon + 1);
-            
-            
-            key.erase(0, key.find_first_not_of(" \t\""));
-            key.erase(key.find_last_not_of(" \t\",") + 1);
-            value.erase(0, value.find_first_not_of(" \t\""));
-            value.erase(value.find_last_not_of(" \t\",") + 1);
-            
-            result[current_section][key] = value;
-        }
-    }
-    
-    return result;
-}
-
-} // namespace TradingBot

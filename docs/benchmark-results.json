@@ -1,0 +1,113 @@
+{
+  "purpose": "Measured local synthetic performance; not an investment result or a production capacity promise",
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "machine": "AMD64",
+    "cpu": "Intel64 Family 6 Model 154 Stepping 3, GenuineIntel",
+    "logical_cpus": 20,
+    "python": "3.11.4",
+    "engine_executable_sha256": "ea86a10c9d7dda4d4ad42e9dbeb6e823638488667850d8ce56465e0b1f5ccebb",
+    "core_executable_sha256": "3a5cc27d5ef70cb460f6b4ca84aa80676c7cc6d2db58ff3b6e6e3eb284601f3b",
+    "engine_source_sha256": "3bb7aff8eade669c476baa3d9c427144b27126f1992d3ca7858f774ef58104f0",
+    "engine_version": "2.0.0",
+    "engine_commit": "003526d-dirty",
+    "provenance_collection": "additional untimed CLI run; hashes identify the measured executables and their compiled source identity",
+    "cmake": [
+      "CMAKE_CXX_FLAGS:STRING=/DWIN32 /D_WINDOWS /GR /EHsc",
+      "CMAKE_CXX_FLAGS_RELEASE:STRING=/O2 /Ob2 /DNDEBUG",
+      "ENABLE_SANITIZERS:BOOL=OFF",
+      "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022"
+    ],
+    "arguments": {
+      "engine": "build\\bin\\Release\\trading_bot.exe",
+      "core": "build\\bin\\Release\\benchmark_engine.exe",
+      "data": "C:\\Users\\Danial\\Documents\\ChatGPT\\personal website\\trading-bot\\data\\opening_demo.csv",
+      "config": null,
+      "strategy": "VWAP_OPENING",
+      "bars": 39000,
+      "repetitions": 5,
+      "build_dir": "build",
+      "output": "docs\\benchmark-results.json"
+    }
+  },
+  "core_in_memory": {
+    "bars": 39000,
+    "benchmark": "synthetic in-memory engine and equivalent SMA kernels",
+    "clock": "std::chrono::steady_clock",
+    "compiler": "MSVC",
+    "core": {
+      "bars_per_second_at_median": 362312.4452466929,
+      "event_count": 39001,
+      "excludes": "bar generation, initial parser loading, process startup, CSV I/O, configuration-file I/O, JSON serialization, file writes",
+      "fill_count": 0,
+      "includes": "strategy reset, in-memory validation, strategy/risk/ledger loop, statistics, result collection and return copy",
+      "median_ms": 107.6419,
+      "milliseconds": [
+        98.1967,
+        105.0265,
+        111.5684,
+        109.3753,
+        107.6419
+      ],
+      "replay_equity_cents": 10000000
+    },
+    "cxx_standard": 17,
+    "interpretation": "local synthetic measurement only; no market profitability or production throughput claim",
+    "ndebug": true,
+    "repetitions": 5,
+    "sma_kernel": {
+      "absolute_checksum_difference": 5.587935447692871e-09,
+      "naive_checksum": 4681566.0221463,
+      "naive_median_ms": 2.4152,
+      "naive_ms": [
+        2.5143,
+        2.4888,
+        2.4152,
+        2.3094,
+        2.2922
+      ],
+      "period": 200,
+      "rolling_checksum": 4681566.022146295,
+      "rolling_median_ms": 0.0928,
+      "rolling_ms": [
+        0.1,
+        0.0959,
+        0.0922,
+        0.0889,
+        0.0928
+      ],
+      "scope": "equivalent arithmetic-only SMA200 outputs; not whole strategy or historical engine versions"
+    },
+    "strategy": "VWAP_OPENING",
+    "synthetic_fixture": "deterministic fictional 2-minute weekday sessions; no exchange holiday calendar",
+    "warmup_iterations_excluded": 1
+  },
+  "complete_cli": {
+    "milliseconds": [
+      632.0552,
+      634.2577,
+      646.6579,
+      652.4114,
+      664.8199
+    ],
+    "median_ms": 646.6579,
+    "warmup_iterations_excluded": 1,
+    "input_rows": 38025,
+    "dataset_sha256": "f99a5cd7dd48a91aa137a384f49d81d33112b382b2addc3085959aecdf3f9b27",
+    "includes": "process launch, configuration, CSV read/validation, backtest, full JSON construction/serialization; stdout discarded",
+    "excludes": "HTTP service, browser rendering, report file storage"
+  },
+  "version_process_baseline": {
+    "milliseconds": [
+      20.6781,
+      19.0138,
+      19.161,
+      18.965,
+      20.0156
+    ],
+    "median_ms": 19.161,
+    "warmup_iterations_excluded": 1,
+    "includes": "process launch and --version handling; not subtracted from other measurements"
+  },
+  "comparison_limit": "Core uses generated in-memory data; CLI uses the named dataset. Do not subtract their timings to infer exact report overhead. Use each as its labeled measurement."
+}

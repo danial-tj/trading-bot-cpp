@@ -1,217 +1,92 @@
-# AI-Driven Trading Bot
+# Opening Bell · C++ trading simulator
 
-A clean, modular C++ trading bot designed for backtesting strategies on historical data. Built with a focus on learning and safety. Start offline with CSV data before considering live trading.
+A reproducible local research app for inspecting strategy signals, simulated fills, fees and portfolio balances. C++17 handles market data, indicators, risk and fixed-point accounting. A Python standard-library service saves runs and immutable activity in SQLite. The browser provides an integrated dark workspace for candlesticks, volume, VWAP/EMA overlays, saved fill markers, performance curves and a buy-and-hold comparison.
 
-## Project Structure
+**Release 2.0 is an offline simulator.** The bundled data is synthetic. Broker execution, borrowed-share short execution and options are not implemented. Bearish VWAP setups are recorded as unfilled research signals. A backtest is not evidence of a durable trading advantage.
 
-```
-tradingBot/
-├── include/                 # Header files
-│   ├── data/               # Data handling (CSV parsing)
-│   ├── strategy/           # Trading strategies
-│   ├── risk/               # Risk management
-│   ├── backtester/         # Backtesting engine
-│   ├── reporting/          # Report generation
-│   └── utils/              # Utilities (logging, etc.)
-├── src/                    # Source files
-│   ├── data/               # CSV parser implementation
-│   ├── strategy/           # Strategy implementations
-│   ├── risk/               # Risk manager implementation
-│   ├── backtester/         # Backtester implementation
-│   ├── reporting/          # Report generator implementation
-│   └── utils/              # Logger implementation
-├── tests/                  # Unit tests
-├── data/                   # Sample data files
-├── reports/                # Generated reports
-├── logs/                   # Log files
-├── CMakeLists.txt          # Main build configuration
-└── README.md               # This file
+## Start on Windows
+
+Requires CMake 3.16+, Visual Studio 2022 Build Tools with the C++ workload, and Python 3.9+. The old MinGW GCC 6.3 installation is insufficient for the C++17 standard-library features used here. The JSON dependency is vendored and builds need no downloads or API keys.
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release --parallel 4
+ctest --test-dir build -C Release --output-on-failure --no-tests=error
+python run_example.py --serve
 ```
 
-## Features
+Open http://127.0.0.1:8765. The interface loads a reproducible VWAP sample on its first visit. Choose a strategy, change its parameters and run another simulation. Stop the server with Ctrl+C. Results remain in `.local/trading.sqlite3` across restarts.
 
-- **Modular Design**: Clean separation of concerns for easy testing and modification
-- **CSV Data Support**: Parse and validate market data from CSV files
-- **🆕 API Data Integration**: Fetch real-time market data from Yahoo Finance and Alpha Vantage
-- **Strategy Framework**: Extensible strategy system with base class inheritance
-- **Multiple Strategies**: SMA Crossover, EMA Crossover, RSI strategies included
-- **Risk Management**: Position sizing, stop-loss, drawdown protection
-- **Backtesting Engine**: Historical strategy simulation with realistic costs
-- **Comprehensive Reporting**: Multiple output formats (CSV, HTML, JSON)
-- **Logging System**: Detailed logging for debugging and monitoring
-- **Data Caching**: Built-in caching to minimize API calls
+Select a session to inspect its saved candles. Toggle the overlay labels, switch between candles and a closing-price line, or use Opening window / Full session and the pan/zoom controls. Arrow keys inspect candles, Home/End select the first/last bar, and dragging pans the chart. Overview, Trades and Run details expose performance, unfilled signals, export and balance verification. Selecting a saved run restores its setup as the starting point for a new run; edits made while it loads are preserved.
 
-## Getting Started
+The design uses black/charcoal surfaces, self-hosted Manrope, compact toolbars and a docked strategy inspector. Thin rules organize the chart and results without rounded dashboard cards or an oversized page header. TradingView informed the chart workflow; the portfolio toolkit and [21st.dev Trade Journal Table](https://21st.dev/@ssychui/components/trade-journal-table) informed the hierarchy and journal. See [DESIGN.md](DESIGN.md) for the applied references and interaction contract. Everything runs locally; no provider account or connection is implied.
 
-### Prerequisites
+## Start on Linux
 
-- C++17 compatible compiler (GCC 7+, Clang 5+, MSVC 2017+)
-- CMake 3.16+
-- Git
-- Internet connection (for API data fetching)
+Requires a C++17 compiler and standard library (GCC 11+ or Clang with a recent standard library recommended), CMake and Python 3.9+.
 
-### Building the Project
-
-```bash
-# Clone the repository
-git clone https://github.com/Teejay021/trading-bot-cpp
-cd tradingBot
-
-# Create build directory
-mkdir build
-cd build
-
-# Configure and build
-cmake ..
-cmake --build . --config Release
-
-# Run tests (optional)
-ctest --output-on-failure
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 4
+ctest --test-dir build --output-on-failure --no-tests=error
+python3 run_example.py --serve
 ```
 
-### Running the Bot
+Windows MSVC builds and tests were run locally. Linux and sanitizer jobs are configured in `.github/workflows/ci.yml`; their remote runs have not been established by this working session.
 
-#### Option 1: With API Data (Recommended - No CSV needed!)
-```bash
-# Test API data fetching
-cd build/bin/Release
-./test_api_data_fetcher.exe
+## Use the engine directly
 
-# Run backtest with live data
-./test_trading_bot_with_api.exe
+```powershell
+.\build\bin\Release\trading_bot.exe --data data/opening_demo.csv --strategy VWAP_OPENING --config examples/config_vwap_opening.json --output report.json
+python run_example.py --dataset sample --strategy SMA_CROSSOVER
+python scripts/recovery_demo.py --engine build/bin/Release/trading_bot.exe
 ```
 
-#### Option 2: With CSV Files
-```bash
-# Basic usage
-./bin/trading_bot <data_file> <strategy_name>
+On Linux, use `build/bin/trading_bot`. `--config` is optional; omitted settings get documented defaults. An explicitly missing or invalid config fails. Unknown settings, duplicate JSON keys, unsupported short execution and invalid data fail with JSON errors on stderr and a nonzero exit. Successful JSON goes to stdout unless `--output` is supplied. `--help` lists the arguments.
 
-# Example
-./bin/trading_bot ../data/SPY.csv SMA_CROSSOVER
+The launcher also accepts `--engine PATH`, `--config PATH`, `--output PATH` and `--port PORT` for serving. The browser only allows the two bundled dataset IDs. The CLI accepts your own CSV without uploading it.
+
+## Opening-session VWAP
+
+The requested setup is a **strong candle within the first 15 or 30 minutes**, aligned with session VWAP, 20/50/200 intraday EMAs and completed weekly/monthly trends. This release makes that interpretation explicit and configurable:
+
+- Default 30-minute window after 09:30, with two-minute candles. Entries must execute before 10:00; the 15-minute setting ends before 09:45.
+- Bullish body at least 60% of the candle range, closing in the top quarter, with at least a 10-basis-point body move.
+- Close above rising session VWAP and above a bullish 20 > 50 > 200 EMA stack. Bearish opportunities mirror the rules.
+- Completed weekly and monthly close trends must agree. The configurable default uses a 2-period EMA of each completed timeframe; this is a starting proxy, not a confirmed rule from the mentor.
+- Full prior sessions warm up the EMAs and higher-timeframe history. Unfinished weeks/months are excluded. Known gapped/truncated sessions invalidate trend history.
+- Exit on a close below VWAP or near the configured session close; actual fills still need another bar.
+
+Read the exact [strategy specification](docs/VWAP_STRATEGY.md), including timestamp semantics, thresholds, warmup and calendar limitations. The existing SMA, EMA and RSI strategies remain independently selectable. All strategies execute after a completed signal bar, at the next observed open with configured costs.
+
+## What is verified
+
+- Checked integer-cent cash, fees, cost basis and realized profit, with whole shares; no unavailable-cash spending or excess selling.
+- Correct marks include both cash and holdings. Partial exits allocate basis; final holdings remain open and marked rather than being silently liquidated.
+- Run state resets, future candles cannot influence previous opening fills, and errors remain distinguishable from zero-trade results.
+- Persistent request idempotency, payload-conflict rejection, worker leases/generations, transactional immutable publication, cancellation and independent replay of accounting history.
+- Real subprocess crash tests before commit and after commit/before acknowledgement. Retried jobs do not publish duplicate results or duplicate accounting events.
+- Six mandatory CTest suites: engine, strategies, config/integration, service/recovery, CLI and immutable chart data. Tests do not disappear in Release builds or when Google Test is absent. Optional chart geometry checks run with `node tests/test_chart_frontend.mjs`.
+
+See [engineering decisions](docs/DECISIONS.md), [service/API and recovery](docs/SERVICE.md), [local verification record](docs/PROGRESS.md), and [data provenance](data/README.md). Some old root-level example tests/docs remain for history and are not the release test suite.
+
+## Reproducibility and performance
+
+Reports retain all effective parameters, engine version, Git description, source SHA-256, dataset fingerprint, fills, outcomes, integer accounting events and simulation assumptions. The service stores an immutable snapshot of the submitted dataset and its SHA-256. Export JSON or use the interface's reconciliation action to inspect a saved result.
+
+```powershell
+python scripts/check_test_discovery.py --build build
+python scripts/benchmark.py --engine build/bin/Release/trading_bot.exe --core build/bin/Release/benchmark_engine.exe --build-dir build --repetitions 5 --output docs/benchmark-results.json
 ```
 
-#### Quick Start Guide
-See `QUICKSTART_API.md` for step-by-step instructions on using the API features.
+The benchmark separates preloaded in-memory engine work from complete CLI latency, including CSV and JSON. It labels synthetic data and records compiler, configuration, repetitions, CPU and memory information where available. Its standalone naive-vs-rolling SMA comparison verifies matching numerical checksums; it is not a claim that the complete application is faster by that ratio. See the recorded benchmark for measured results and scope.
 
-## Data Format
+For supported GCC/Clang builds, `-DENABLE_SANITIZERS=ON` enables AddressSanitizer and UndefinedBehaviorSanitizer. CI checks expected suite discovery so a missing suite fails the build.
 
-The bot expects CSV files with the following columns:
-- `timestamp`: Date/time in ISO format (YYYY-MM-DD HH:MM:SS)
-- `open`: Opening price
-- `high`: High price
-- `low`: Low price
-- `close`: Closing price
-- `volume`: Trading volume
+## Limits of this release
 
-Example:
-```csv
-timestamp,open,high,low,close,volume
-2023-01-01 09:30:00,100.00,101.50,99.50,101.00,1000000
-2023-01-01 09:31:00,101.00,102.00,100.75,101.75,950000
-```
+Each simulation has its own portfolio. There is no shared-account order reservation service, partial market fills, options pricing, brokerage adapter, live trading, public authentication, exchange calendar, corporate-action processing or real market data subscription. VWAP uses OHLCV typical-price approximation and assumes complete regular sessions in exchange-local time. Execution assumes the next quoted open is available, with no liquidity/participation model.
 
-## Strategies
+The browser's money symbol represents one nominal simulation currency; no FX or CAD/USD account selection is implied. Buy-and-hold uses the full available balance, while a strategy may use a smaller allocation. Stops are close-based decisions and can execute beyond their thresholds after a gap. Unsupported annualized/Sharpe metrics are null rather than fabricated zero values.
 
-### SMA Crossover Strategy
-A simple moving average crossover strategy that:
-- Buys when short-term SMA crosses above long-term SMA
-- Sells when short-term SMA crosses below long-term SMA
-- Configurable periods for short and long moving averages
-
-### EMA Crossover Strategy
-Exponential moving average crossover:
-- Uses EMA instead of SMA for faster reaction to price changes
-- Better for trending markets
-- Configurable short and long periods
-
-### RSI Strategy
-Relative Strength Index momentum strategy:
-- Buys when RSI crosses below oversold threshold (default 30)
-- Sells when RSI crosses above overbought threshold (default 70)
-- Configurable period and thresholds
-
-### Adding New Strategies
-1. Inherit from the `Strategy` base class
-2. Implement required virtual methods
-3. Add strategy to the strategy factory
-4. Update configuration files
-
-## Risk Management
-
-The bot includes several risk management features:
-- **Position Sizing**: Based on portfolio percentage and ATR
-- **Stop Loss**: Configurable percentage-based stop losses
-- **Take Profit**: Configurable profit targets
-- **Drawdown Protection**: Maximum drawdown limits
-- **Daily Loss Limits**: Maximum daily loss protection
-
-## Configuration
-
-Create a `config.json` file to customize:
-- Initial capital
-- Commission rates
-- Risk parameters
-- Strategy parameters
-- Logging levels
-
-## Testing
-
-Run the test suite to ensure everything works correctly:
-```bash
-cd build
-ctest --output-on-failure
-```
-
-## 🆕 New: API Data Integration
-
-Fetch real market data directly from APIs:
-
-```cpp
-#include "trading_bot.h"
-
-int main() {
-    TradingBot::TradingBot bot;
-    bot.initialize("config.json");
-    
-    // Run backtest with API data (no CSV needed!)
-    bot.run_backtest_with_api(
-        "AAPL",           // Symbol
-        "SMA_CROSSOVER",  // Strategy  
-        "2024-01-01",     // Start date
-        "2024-10-07"      // End date
-    );
-    
-    bot.generate_report("AAPL_report.html");
-    return 0;
-}
-```
-
-**Supported Providers:**
-- **Yahoo Finance** (default, no API key required)
-- **Alpha Vantage** (optional, for intraday data)
-
-**See `QUICKSTART_API.md` and `API_INTEGRATION_GUIDE.md` for details.**
-
-## Future Enhancements
-
-- **Machine Learning Integration**: Add ML-based signal generation
-- **Paper Trading**: Simulate live trading without real money
-- ~~**Real-time Data**: Connect to live market data feeds~~ ✅ **DONE!**
-- **Portfolio Optimization**: Multi-asset portfolio management
-- **Advanced Analytics**: More sophisticated performance metrics
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
-
-## License
-
-This project is for educational purposes. Use at your own risk.
-
-## Disclaimer
-
-This software is for educational and research purposes only. It is not financial advice. Trading involves risk and you can lose money. Always test thoroughly before using with real money.
+The old network adapter code is excluded from the release build. Its previous TLS/cache implementation requires separate repair and verification before any reuse. No credentials or user accounts are required for the finished local workflow.

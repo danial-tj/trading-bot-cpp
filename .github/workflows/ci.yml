@@ -1,0 +1,34 @@
+name: Offline simulator
+on: [push, pull_request]
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Discover expected suites
+        run: python scripts/check_test_discovery.py --build build
+      - name: Deterministic tests
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+      - name: Actual worker crash recovery
+        run: python scripts/recovery_demo.py
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build -R '^(engine|strategies|config)$' --output-on-failure --no-tests=error

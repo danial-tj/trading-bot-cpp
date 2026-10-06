@@ -1,237 +1,64 @@
 cmake_minimum_required(VERSION 3.16)
-project(TradingBot VERSION 1.0.0 LANGUAGES CXX)
-
-# Set C++ standard
+project(TradingBot VERSION 2.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Set output directories
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-
-# Find required packages
-# find_package(PkgConfig REQUIRED)
-
-# Add subdirectories
-add_subdirectory(src)
-add_subdirectory(tests)
-
-# Main executable (commented out until all components are ready)
-# add_executable(trading_bot 
-#     src/main.cpp
-#     src/backtester/backtester.cpp
-#     src/data/csv_parser.cpp
-#     src/strategy/strategy.cpp
-#     src/risk/risk_manager.cpp
-#     src/reporting/report_generator.cpp
-#     src/utils/logger.cpp
-# )
-
-# Test executable for CSV parser
-add_executable(test_csv
-    test_csv.cpp
-    src/data/csv_parser.cpp
-)
-
-# Test executable for SMA strategy
-add_executable(test_sma_strategy
-    test_sma_strategy.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/sma_crossover_strategy.cpp
-)
-
-# Include directories (commented out until main executable is ready)
-# target_include_directories(trading_bot PRIVATE
-#     ${CMAKE_SOURCE_DIR}/include
-#     ${CMAKE_SOURCE_DIR}/src
-# )
-
-target_include_directories(test_csv PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-target_include_directories(test_sma_strategy PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Test executable for RSI strategy
-add_executable(test_rsi_strategy
-    test_rsi_strategy.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/rsi_strategy.cpp
-)
-
-# Test executable for EMA strategy
-add_executable(test_ema_strategy
-    test_ema_strategy.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/ema_strategy.cpp
-)
-
-target_include_directories(test_rsi_strategy PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-target_include_directories(test_ema_strategy PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Test executable for Risk Manager
-add_executable(test_risk_manager
-    test_risk_manager.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/risk/risk_manager.cpp
-)
-
-target_include_directories(test_risk_manager PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Test executable for Backtester
-add_executable(test_backtester
-    test_backtester.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/sma_crossover_strategy.cpp
-    src/risk/risk_manager.cpp
-    src/backtester/backtester.cpp
-)
-
-target_include_directories(test_backtester PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Test executable for complete TradingBot integration
-add_executable(test_trading_bot
-    test_trading_bot.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/sma_crossover_strategy.cpp
-    src/strategy/ema_strategy.cpp
-    src/strategy/rsi_strategy.cpp
-    src/risk/risk_manager.cpp
-    src/backtester/backtester.cpp
-    src/trading_bot.cpp
-)
-
-target_include_directories(test_trading_bot PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Simple test executable for TradingBot
-add_executable(test_simple_trading_bot
-    test_simple_trading_bot.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/sma_crossover_strategy.cpp
-    src/strategy/ema_strategy.cpp
-    src/strategy/rsi_strategy.cpp
-    src/risk/risk_manager.cpp
-    src/backtester/backtester.cpp
-    src/trading_bot.cpp
-    src/utils/logger.cpp
-    src/reporting/report_generator.cpp
-)
-
-target_include_directories(test_simple_trading_bot PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Complete system test executable
-add_executable(test_complete_system
-    test_complete_system.cpp
-    src/data/csv_parser.cpp
-    src/strategy/strategy.cpp
-    src/strategy/sma_crossover_strategy.cpp
-    src/strategy/ema_strategy.cpp
-    src/strategy/rsi_strategy.cpp
-    src/risk/risk_manager.cpp
-    src/backtester/backtester.cpp
-    src/trading_bot.cpp
-    src/utils/logger.cpp
-    src/reporting/report_generator.cpp
-)
-
-target_include_directories(test_complete_system PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Test executable for API Data Fetcher
-add_executable(test_api_data_fetcher
-    test_api_data_fetcher.cpp
-    src/data/api_data_fetcher.cpp
-)
-
-target_include_directories(test_api_data_fetcher PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Link WinHTTP on Windows, or libcurl on Unix-like systems
-if(WIN32)
-    target_link_libraries(test_api_data_fetcher PRIVATE winhttp)
-else()
-    find_package(CURL REQUIRED)
-    target_include_directories(test_api_data_fetcher PRIVATE ${CURL_INCLUDE_DIR})
-    target_link_libraries(test_api_data_fetcher PRIVATE ${CURL_LIBRARIES})
+option(ENABLE_SANITIZERS "Enable address/undefined sanitizers with GCC or Clang" OFF)
+include(CTest)
+find_package(Python3 3.9 COMPONENTS Interpreter REQUIRED)
+find_package(Git QUIET)
+set(ENGINE_COMMIT "unknown")
+if(GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --dirty WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} OUTPUT_VARIABLE ENGINE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 endif()
-
-# Test executable for TradingBot with API integration
-add_executable(test_trading_bot_with_api
-    test_trading_bot_with_api.cpp
-    src/data/csv_parser.cpp
-    src/data/api_data_fetcher.cpp
-    src/strategy/strategy.cpp
-    src/strategy/sma_crossover_strategy.cpp
-    src/strategy/ema_strategy.cpp
-    src/strategy/rsi_strategy.cpp
-    src/risk/risk_manager.cpp
-    src/backtester/backtester.cpp
-    src/trading_bot.cpp
-    src/utils/logger.cpp
-    src/reporting/report_generator.cpp
-)
-
-target_include_directories(test_trading_bot_with_api PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-# Link WinHTTP on Windows, or libcurl on Unix-like systems
-if(WIN32)
-    target_link_libraries(test_trading_bot_with_api PRIVATE winhttp)
+file(GLOB_RECURSE ENGINE_SOURCE_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.h" "${CMAKE_SOURCE_DIR}/include/*.h" "${CMAKE_SOURCE_DIR}/third_party/nlohmann/json.hpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${ENGINE_SOURCE_FILES})
+set(ENGINE_SOURCE_HASHES "")
+foreach(source IN LISTS ENGINE_SOURCE_FILES)
+  file(SHA256 "${source}" digest)
+  string(APPEND ENGINE_SOURCE_HASHES "${digest}")
+endforeach()
+string(SHA256 ENGINE_SOURCE_HASH "${ENGINE_SOURCE_HASHES}")
+add_library(trading_engine
+  src/data/csv_parser.cpp
+  src/strategy/strategy.cpp
+  src/strategy/sma_crossover_strategy.cpp
+  src/strategy/ema_strategy.cpp
+  src/strategy/rsi_strategy.cpp
+  src/strategy/vwap_opening_strategy.cpp
+  src/risk/risk_manager.cpp
+  src/backtester/ledger.cpp
+  src/backtester/backtester.cpp
+  src/configuration.cpp
+  src/result_json.cpp
+  src/trading_bot.cpp)
+target_include_directories(trading_engine PUBLIC include third_party)
+target_compile_definitions(trading_engine PRIVATE TRADING_BOT_COMMIT="${ENGINE_COMMIT}" TRADING_BOT_SOURCE_SHA256="${ENGINE_SOURCE_HASH}")
+if(MSVC)
+  target_compile_options(trading_engine PRIVATE /W4 /permissive- /utf-8)
 else()
-    find_package(CURL REQUIRED)
-    target_include_directories(test_trading_bot_with_api PRIVATE ${CURL_INCLUDE_DIR})
-    target_link_libraries(test_trading_bot_with_api PRIVATE ${CURL_LIBRARIES})
+  target_compile_options(trading_engine PRIVATE -Wall -Wextra -Wpedantic)
+  if(ENABLE_SANITIZERS)
+    target_compile_options(trading_engine PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(trading_engine PUBLIC -fsanitize=address,undefined)
+  endif()
 endif()
-
-# Link libraries (commented out until main executable is ready)
-# target_link_libraries(trading_bot PRIVATE
-#     csv_parser
-#     strategy
-#     risk_manager
-#     report_generator
-#     logger
-# )
-
-# Compiler flags (commented out until main executable is ready)
-# if(MSVC)
-#     target_compile_options(trading_bot PRIVATE /W4)
-# else()
-#     target_compile_options(trading_bot PRIVATE -Wall -Wextra -Wpedantic)
-# endif()
+add_executable(trading_bot src/main.cpp)
+target_link_libraries(trading_bot PRIVATE trading_engine)
+if(BUILD_TESTING)
+  foreach(suite engine strategies config)
+    add_executable(test_${suite} tests/test_${suite}.cpp)
+    target_link_libraries(test_${suite} PRIVATE trading_engine)
+    add_test(NAME ${suite} COMMAND test_${suite})
+    set_tests_properties(${suite} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  endforeach()
+  add_test(NAME service COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p test_service.py -v)
+  set_tests_properties(service PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} ENVIRONMENT "TRADING_BOT_ENGINE=$<TARGET_FILE:trading_bot>")
+  add_test(NAME chart_data COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p test_chart_data.py -v)
+  set_tests_properties(chart_data PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME cli COMMAND ${Python3_EXECUTABLE} tests/test_cli.py --engine $<TARGET_FILE:trading_bot>)
+  set_tests_properties(cli PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+add_executable(benchmark_engine tests/benchmark_engine.cpp)
+target_link_libraries(benchmark_engine PRIVATE trading_engine)

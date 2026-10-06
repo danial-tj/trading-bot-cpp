@@ -1,3 +1,5 @@
+> Historical pre-2.0 document. Its feature, build, API, test and performance claims are superseded by [the current README](README.md) and [verified progress](docs/PROGRESS.md). Network adapters are excluded from the offline release.
+
 # Quick Start: API Integration
 
 ## 🎉 Congratulations! Your Trading Bot Now Supports Live Data!
@@ -179,13 +181,3 @@ Your trading bot is now production-ready with:
 - ✅ Data caching and persistence
 
 Happy trading! 🚀📈
-
-
-
-
-
-
-
-
-
-

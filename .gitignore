@@ -1,5 +1,10 @@
 # Build directories
 build/
+build-*/
+.local/
+__pycache__/
+*.pyc
+.env
 bin/
 lib/
 out/
@@ -45,6 +50,7 @@ logs/
 reports/
 *.log
 *.html
+!service/static/index.html
 
 # IDE files
 .vscode/

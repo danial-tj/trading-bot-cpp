@@ -1,0 +1,7 @@
+{
+  "strategies": {
+    "VWAP_OPENING": {
+      "opening_window_minutes": 15
+    }
+  }
+}

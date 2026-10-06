@@ -1,0 +1,14 @@
+{
+  "strategies": {
+    "VWAP_OPENING": {
+      "opening_window_minutes": 30,
+      "fast_ema": 20,
+      "medium_ema": 50,
+      "slow_ema": 200,
+      "min_body_fraction": 0.6,
+      "min_close_location": 0.75,
+      "min_move_bps": 10,
+      "trend_ema_period": 2
+    }
+  }
+}

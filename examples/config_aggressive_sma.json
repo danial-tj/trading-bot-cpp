@@ -1,77 +1,11 @@
 {
-    "trading_bot": {
-        "name": "Aggressive_SMA_Bot",
-        "version": "1.0.0",
-        "description": "Aggressive SMA crossover strategy for volatile markets"
-    },
-    
-    "backtesting": {
-        "initial_capital": 50000.0,
-        "commission_rate": 0.001,
-        "slippage": 0.0005,
-        "enable_short_selling": true,
-        "start_date": "2020-01-01",
-        "end_date": "2023-12-31"
-    },
-    
-    "risk_management": {
-        "max_position_size": 0.05,
-        "max_drawdown": 0.30,
-        "stop_loss_pct": 0.03,
-        "take_profit_pct": 0.15,
-        "max_daily_loss": 0.08,
-        "position_sizing_atr": 2.5
-    },
-    
-    "strategies": {
-        "SMA_CROSSOVER": {
-            "short_period": 5,
-            "long_period": 20,
-            "description": "Fast SMA Crossover - Aggressive trading signals"
-        }
-    },
-    
-    "logging": {
-        "log_file": "./logs/aggressive_sma_bot.log",
-        "min_level": "DEBUG",
-        "console_output": true,
-        "file_output": true,
-        "timestamp": true,
-        "max_file_size_mb": 10
-    },
-    
-    "reporting": {
-        "output_format": "HTML",
-        "output_directory": "./reports/aggressive_sma",
-        "include_charts": true,
-        "include_trade_details": true,
-        "chart_format": "PNG"
-    },
-    
-    "data": {
-        "csv_format": {
-            "timestamp_column": "timestamp",
-            "open_column": "open",
-            "high_column": "high",
-            "low_column": "low",
-            "close_column": "close",
-            "volume_column": "volume",
-            "date_format": "%Y-%m-%d %H:%M:%S"
-        },
-        "validation": {
-            "check_missing_values": true,
-            "check_price_consistency": true,
-            "min_volume": 0.0
-        }
-    },
-    
-    "api": {
-        "default_provider": "yahoo_finance",
-        "default_symbol": "TSLA",
-        "default_interval": "daily",
-        "cache_enabled": true,
-        "auto_save_csv": true,
-        "csv_output_directory": "./data/aggressive_sma"
+  "risk_management": {
+    "max_position_size": 0.25
+  },
+  "strategies": {
+    "SMA_CROSSOVER": {
+      "short_period": 3,
+      "long_period": 9
     }
+  }
 }
-

@@ -1,3 +1,5 @@
+> Historical pre-2.0 document. Its feature, build, API, test and performance claims are superseded by [the current README](README.md) and [verified progress](docs/PROGRESS.md). Network adapters are excluded from the offline release.
+
 # Trading Bot - Comprehensive TODO & Improvement Plan
 
 **Last Updated:** October 12, 2025  

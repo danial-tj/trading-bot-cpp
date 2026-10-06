@@ -1,3 +1,5 @@
+> Historical pre-2.0 document. Its feature, build, API, test and performance claims are superseded by [the current README](README.md) and [verified progress](docs/PROGRESS.md). Network adapters are excluded from the offline release.
+
 # Development Guide
 
 This guide explains how to extend and modify the AI Trading Bot.
