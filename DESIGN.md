@@ -25,7 +25,7 @@ Use the bundled Manrope font for headings, controls and body copy, with tabular 
 
 ## Composition and behavior
 
-- A plain wordmark and two real destinations lead the header: Workbench and Saved runs. A saved run opens its own immutable result and settings.
+- A plain wordmark and three real destinations lead the header: Workbench, Saved runs and Data. A saved run opens its own immutable result and settings.
 - The workbench integrates a wide chart, results beneath it and a right-hand setup dock. Do not separate these working surfaces into a collection of floating cards. Compact layouts move setup below the chart while preserving readable fields and touch controls.
 - The chart toolbar contains the session and chart type. OHLC, indicator values and the opening-window overlay refer to actual saved candles. Session labels are readable dates; requests retain the ISO date value.
 - The inspector presents rule labels paired with values from the actual editable parameters, without an onboarding stepper or invented pass/fail states. The 15/30-minute control changes the next run's settings, not the currently displayed saved result. Editing is explicit; a delayed result must not overwrite subsequent form edits.
@@ -33,8 +33,10 @@ Use the bundled Manrope font for headings, controls and body copy, with tabular 
 - Final equity leads the supporting performance strip. Overview, Trades and Run details expose the equity curve, execution journal and reproducibility information without competing with the main price chart.
 - Saved runs use readable journal rows, not miniature cards. Display all runs returned by the service. Loading, cancellation, failure and empty data remain truthful states.
 - Preserve keyboard chart inspection, labelled pan/zoom controls, radio arrow-key navigation, result-tab navigation, visible focus and inline validation. Disable chart controls while their data is unavailable. Keep the local same-origin security policy.
-- Session, strategy, dataset and activity choices use app-owned dark menus rather than platform select popups. Menus anchor to their triggers, show a clear selected row and tick, constrain long lists to a scrolling region, and support arrows, Enter, Escape, Tab/Shift+Tab and outside dismissal. Session search includes a readable empty-results state. Hidden native selects remain the value source for existing form behavior.
+- Session, strategy, dataset, activity, import interval and price-adjustment choices use app-owned dark menus rather than platform select popups. Menus anchor to their triggers, show a clear selected row and tick, constrain long lists to a scrolling region, and support arrows, Enter, Escape, Tab/Shift+Tab and outside dismissal. Session search includes a readable empty-results state. Hidden native selects remain the value source for existing form behavior.
 - Validation stays in the dark interface, marks and focuses the invalid field, and does not call the browser's `reportValidity()` popup. The price chart is inert while new candles load. Opening/full-view selection and pan/zoom availability derive from the actual visible range; zooming keeps the displayed quote consistent with that range.
+
+The Data workspace uses an adjoining import form and format reference, followed by a compact dataset library. Source, interval, declared time zone, price adjustment and currency remain explicit. Imports are labelled user-provided; the header says no live feed is connected. Each saved chart/result uses its own metadata, while editing a dataset changes only the next-run setup. Data notes, validation failures and import success are inline. Use the same dark menus and touch targets throughout; do not introduce a white native picker for interval choices. Chart failures expose a local retry for the requested session, and loading saved settings clears stale validation errors.
 
 ## Motion
 

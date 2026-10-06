@@ -69,3 +69,18 @@ Final measured binaries and source fingerprints, hardware, flags and repeated ti
 The finishable local research workflow is implemented and verified on Windows. Follow-up brokerage or real-market work can proceed separately without changing what this release claims.
 
 Final menu check: at 812×375 the open session menu stayed inside the viewport (top 177px, bottom 367px), with document width 805px and scroll width 805px. The activity menu switched to real unfilled-signal rows. The final browser console contained no warnings or errors. Both dropdown screenshots were saved from the working application.
+
+
+## Historical CSV import milestone · 2026-10-06
+
+Added a Data workspace for local OHLCV CSV imports, a persistent immutable dataset registry, strict format/price/session validation, original-file and canonical snapshot fingerprints, and saved source/symbol/timezone/currency/adjustment metadata. Imported labels mean user-provided, not independently verified market data. No live data feed or provider account is connected.
+
+The chart now uses each imported dataset's interval and session boundaries. Crossover/RSI views retain extended-hours bars and fills; opening VWAP stays in regular sessions. Reference VWAP excludes extended hours. Saved-run details and exports retain source metadata, and the interface formats money in the declared simulation currency without FX conversion. Loading saved settings clears stale form errors, daily/VWAP validation focuses the dataset control, and a failed chart request has a session-preserving retry.
+
+Validation: all **seven CTest suites passed** in **17.53 seconds**, using the existing unchanged C++ Release binary. This includes **34 service tests**, **30 import tests**, and **20 chart tests**, plus engine, strategy, configuration and CLI suites. The service suite includes concurrent import deduplication, registry limits, immutable data/metadata, HTTP security/body limits, imported-run execution and an eight-thread legacy-schema migration regression. Standalone chart geometry tests and JavaScript syntax checks passed; suite discovery lists all seven required suites.
+
+Browser checks imported the bundled two-minute opening fixture under the explicit name “QA · synthetic opening sessions”, ran Opening VWAP, and confirmed its symbol, source and interval. A BOM-prefixed daily synthetic fixture imported as “QA · synthetic daily CAD”, correctly rejected Opening VWAP with focus on the invalid selector, then completed EMA crossover. Its stored original fingerprint matches the exact BOM-bearing file bytes, exported metadata retains CAD/QADAILY, and independent accounting replay passes. These fixtures establish import correctness only, not market performance.
+
+Invalid capital followed by saved-run selection restores valid settings and clears the old error. Stopping the owned local service caused a chart failure; restarting it and using Retry chart restored the requested May 2 session. Imported datasets and completed runs survived the restart and browser reload. At 390×844 the Data workspace and open interval menu fit within the 383px document width without horizontal overflow. The final reloaded browser console contained no warnings/errors. Actual captures: [Data workspace](import-preview.jpg) and [mobile interval menu](import-mobile.jpg).
+
+The local test imports and results are in the ignored SQLite database. No real historical market dataset has been evaluated in this milestone. The next research step is to supply appropriately sourced historical sessions and evaluate the 15/30-minute settings with costs and held-out periods before adding live quotes/paper execution.

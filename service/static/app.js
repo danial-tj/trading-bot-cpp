@@ -1,10 +1,11 @@
 'use strict';
 import {MarketChart} from './market-chart.js';
 import {DarkSelect} from './dark-select.js';
+import {DatasetLibrary,intervalLabel,originLabel} from './dataset-library.js';
 const $ = id => document.getElementById(id);
 const menuControls=[['session-select','Chart session',true],['strategy','Strategy model'],['dataset','Dataset'],['activity-filter','Show activity']].map(([id,label,searchable])=>new DarkSelect($(id),{label,searchable}));
 const syncMenus=()=>menuControls.forEach(control=>control.sync());
-let chartControlsEnabled=false;
+let chartControlsEnabled=false, datasetCatalog=[], failedChartSession;
 const names = {VWAP_OPENING:'Opening VWAP',SMA_CROSSOVER:'SMA crossover',EMA_CROSSOVER:'EMA crossover',RSI:'RSI recovery'};
 const descriptions={VWAP_OPENING:'Strong opening candles. Higher-timeframe confirmation.',SMA_CROSSOVER:'Study the crossover between two moving averages.',EMA_CROSSOVER:'Track changes in direction with exponential averages.',RSI:'Study momentum as price leaves an extreme.'};
 const parameterSets = {
@@ -14,7 +15,7 @@ const parameterSets = {
   RSI:[['rsi_period','RSI period',14,1,1000,1],['oversold_threshold','Oversold threshold',30,1,99,1],['overbought_threshold','Overbought threshold',70,1,99,1]]
 };
 let report=null, selectedRun=null, page=0, pollVersion=0, pendingRequest=null, chartVersion=0, chartData=null, formRevision=0, loadingFormRevision=0, submitting=false;
-const money = value => Number.isFinite(value) ? new Intl.NumberFormat('en-CA',{style:'currency',currency:'USD',currencyDisplay:'narrowSymbol'}).format(value) : '—';
+const money = value => Number.isFinite(value) ? new Intl.NumberFormat('en-CA',{style:'currency',currency:selectedRun?.dataset_info?.currency||'USD',currencyDisplay:'narrowSymbol'}).format(value) : '—';
 const pct = value => Number.isFinite(value) ? (value*100).toFixed(2)+'%' : '—';
 const num = value => new Intl.NumberFormat('en-CA',{maximumFractionDigits:2}).format(value);
 function node(tag, text, className) { const el=document.createElement(tag); if(text!=null)el.textContent=text;if(className)el.className=className;return el; }
@@ -25,6 +26,38 @@ async function api(path, options) {
   if(!response.ok) throw new Error(typeof data.error==='string'?data.error:JSON.stringify(data.error||data));
   return data;
 }
+
+function workspaceFromHash(){return location.hash==='#saved-runs'?'history':location.hash==='#data'?'data':'workbench';}
+function datasetInfo(id){return datasetCatalog.find(data=>data.id===id)||{id,name:id,symbol:'SIM',currency:'USD',origin:'synthetic',bar_minutes:id==='opening_demo'?2:0,session_open_minute:570,timezone:'exchange-local demo'};}
+function clockLabel(minute){return String(Math.floor(minute/60)).padStart(2,'0')+':'+String(minute%60).padStart(2,'0');}
+function runContext(run){const data=run.dataset_info||datasetInfo(run.dataset);return [originLabel(data),intervalLabel(data)+' candles',data.currency||'USD','Saved locally'].join(' · ');}
+function renderInstrument(data){
+  $('instrument-symbol').textContent=data.symbol||'SIM';$('instrument-source').textContent=originLabel(data);$('instrument-source').title=data.source||data.name;
+  $('interval-label').textContent=intervalLabel(data);$('market-description').textContent=data.name+' · '+originLabel(data);
+}
+function updateDatasetNote(){
+  const data=datasetInfo($('dataset').value);
+  $('dataset-note').textContent=[originLabel(data),intervalLabel(data)+' candles',data.origin==='imported'?data.source:'Fictional prices for testing'].filter(Boolean).join(' · ');
+  $('capital-label').textContent='Capital ('+(data.currency||'USD')+')';
+  $('session-note').textContent='From '+clockLabel(data.session_open_minute??570)+' · '+(data.timezone||'exchange time');
+}
+function updateCatalog(datasets){
+  datasetCatalog=datasets;const selected=$('dataset').value;const options=datasets.map(data=>{const option=node('option',data.name+' · '+intervalLabel(data));option.value=data.id;return option;});
+  $('dataset').replaceChildren(...options);if(datasets.some(data=>data.id===selected))$('dataset').value=selected;
+  updateDatasetNote();syncMenus();
+}
+function renderDatasetDetails(data){
+  const rows=[['Dataset',data.name],['Origin',originLabel(data)],['Source',data.source||'Bundled synthetic fixture'],['Symbol / currency',(data.symbol||'SIM')+' / '+(data.currency||'USD')],['Candle interval',intervalLabel(data)],['Time zone',data.timezone||'exchange-local demo']];
+  if(data.price_adjustment)rows.push(['Price adjustment',data.price_adjustment.replaceAll('_',' ')]);
+  if(data.first_timestamp)rows.push(['Coverage',data.first_timestamp.slice(0,10)+' → '+data.last_timestamp.slice(0,10)]);
+  $('data-summary').replaceChildren(...rows.map(([key,value])=>{const row=node('div');row.append(node('dt',key),node('dd',value));return row;}));
+  $('data-warnings').replaceChildren(...(data.warnings||[]).map(text=>node('li',text)));
+}
+const datasetLibrary=new DatasetLibrary({api,onCatalog:updateCatalog,onSelect:data=>{
+  $('dataset').value=data.id;updateDatasetNote();syncMenus();markEdited();showWorkspace('workbench');
+  $('dataset-trigger').focus();
+}});
+
 function parameterInputs() {
   const strategy=$('strategy').value;
   $('vwap-settings').hidden=strategy!=='VWAP_OPENING';
@@ -52,13 +85,14 @@ function renderRuleSteps(){
   $('rule-steps').replaceChildren(...rows[strategy].map(([label,value])=>{const row=node('li');row.append(node('span',label,'rule-label'),node('span',value,'rule-value'));return row;}));
 }
 function syncWindow(){for(const button of document.querySelectorAll('[data-window]')){const selected=button.dataset.window===$('window').value;button.setAttribute('aria-checked',String(selected));button.tabIndex=selected?0:-1;}}
-function clearValidation(){for(const input of document.querySelectorAll('[aria-invalid=true]')){input.removeAttribute('aria-invalid');input.removeAttribute('aria-describedby');}}
+function clearValidation(){for(const input of $('run-form').querySelectorAll('[aria-invalid=true]')){input.removeAttribute('aria-invalid');input.removeAttribute('aria-describedby');}}
 function markEdited(){clearValidation();error('','form-error');formRevision++;$('setup-state').textContent='Edited · not run';$('setup-state').classList.add('edited');renderRuleSteps();}
 function setSubmitting(active){submitting=active;$('run-button').disabled=active;document.querySelector('.inspector-run').disabled=active;$('run-button').textContent=active?'Saving run…':'Run backtest';}
 function showWorkspace(name,updateHash=true){
-  const historyView=name==='history';$('workbench').hidden=historyView;$('saved-runs').hidden=!historyView;
+  for(const [key,id] of [['workbench','workbench'],['history','saved-runs'],['data','data-workspace']])$(id).hidden=key!==name;
+  for(const menu of menuControls)menu.close(false);
   for(const link of document.querySelectorAll('[data-workspace]')){if(link.dataset.workspace===name)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
-  if(updateHash)history.replaceState(null,'',historyView?'#saved-runs':'#workbench');
+  if(updateHash)history.replaceState(null,'',name==='history'?'#saved-runs':name==='data'?'#data':'#workbench');
 }
 function journalTime(timestamp){const date=timestamp.slice(0,10).split('-').map(Number);if(date.length!==3)return timestamp;return new Date(date[0],date[1]-1,date[2]).toLocaleDateString('en-CA',{month:'short',day:'numeric',year:'numeric'})+(timestamp.length>10?' · '+timestamp.slice(11,16):'');}
 function requestPayload(){
@@ -72,7 +106,7 @@ async function submit(event){
   const invalid=$('run-form').querySelector(':invalid');
   if(invalid){const details=invalid.closest('details');if(details)details.open=true;error(invalid.validationMessage,'form-error');invalid.setAttribute('aria-invalid','true');invalid.setAttribute('aria-describedby','form-error');invalid.focus();return;}
   const payload=requestPayload();
-  if(payload.strategy==='VWAP_OPENING'&&payload.dataset!=='opening_demo'){error('Opening VWAP needs intraday bars. Choose the opening-session dataset.','form-error');return;}
+  if(payload.strategy==='VWAP_OPENING'&&!datasetInfo(payload.dataset).bar_minutes){error('Opening VWAP needs intraday candles. Choose an intraday dataset, or use a crossover or RSI strategy for daily prices.','form-error');const trigger=$('dataset-trigger');trigger.setAttribute('aria-invalid','true');trigger.setAttribute('aria-describedby','form-error');trigger.focus();return;}
   const signature=JSON.stringify(payload);
   const submittedRevision=formRevision;
   if(!pendingRequest||pendingRequest.signature!==signature)pendingRequest={signature,request_id:crypto.randomUUID()};
@@ -89,16 +123,15 @@ async function selectRun(run,{reveal=true,focus=false,setupRevision=formRevision
   const version=++pollVersion;selectedRun=run;report=null;page=0;
   try{localStorage.setItem('opening-bell-selected-run',run.id);}catch{}
   loadingFormRevision=setupRevision;
-  ++chartVersion;chartData=null;marketChart.setData(null);resetQuote();setChartControls(false);error('','market-error');
+  ++chartVersion;chartData=null;$('chart-data-note').hidden=true;$('retry-chart').hidden=true;failedChartSession=undefined;marketChart.setData(null);resetQuote();setChartControls(false);error('','market-error');
   $('market-chart').setAttribute('aria-busy','true');
   $('session-select').replaceChildren(node('option','Loading…'));
   $('opening-view').hidden=true;$('window-label').hidden=true;
-  $('market-description').textContent=run.dataset==='opening_demo'?'/ Synthetic opening sessions':'/ Synthetic daily cycle';
-  $('interval-label').textContent=run.dataset==='opening_demo'?'2m':'1D';
+  renderInstrument(run.dataset_info||datasetInfo(run.dataset));
   error('');$('result-content').hidden=true;$('download-button').disabled=true;
   $('result-title').textContent=names[run.strategy]||run.strategy;
   $('strategy-description').textContent=descriptions[run.strategy]||'';
-  $('result-subtitle').textContent=(run.dataset==='opening_demo'?'Two-minute session data':'Daily cycle data')+' · Saved locally';
+  $('result-subtitle').textContent=runContext(run);
   $('result-subtitle').title='Run '+run.id;
   $('reconcile-result').textContent='';
   await showRunStatus(run,version);
@@ -121,7 +154,8 @@ async function showRunStatus(run,version){
 function renderResult(){
   const r=report.results;$('result-content').hidden=false;$('loading').hidden=true;$('download-button').disabled=false;
   if(formRevision===loadingFormRevision)loadSavedSetup();
-  if(report.strategy==='VWAP_OPENING')$('result-subtitle').textContent=report.effective_config.strategies.VWAP_OPENING.opening_window_minutes+'-minute entry window · 2-minute candles · Sample data';
+  $('result-subtitle').textContent=runContext(selectedRun)+(report.strategy==='VWAP_OPENING'?' · '+report.effective_config.strategies.VWAP_OPENING.opening_window_minutes+' min entry window':'');
+  renderDatasetDetails(selectedRun.dataset_info||datasetInfo(selectedRun.dataset));
   $('equity').textContent=money(r.final_equity);
   const change=r.final_equity-r.initial_cash_cents/100;
   $('net-change').textContent=(change>=0?'+':'')+money(change)+' from start';
@@ -134,7 +168,7 @@ function renderResult(){
     const row=node('div');row.append(node('dt',label),node('dd',value));balances.append(row);
   }
   drawCharts();renderActivity();
-  $('provenance').textContent=JSON.stringify({run_id:selectedRun.id,engine_version:report.engine_version,engine_commit:report.engine_commit,engine_source_sha256:report.engine_source_sha256,dataset_fingerprint:report.dataset_fingerprint,dataset_sha256:selectedRun.dataset_sha256,effective_config:report.effective_config},null,2);
+  $('provenance').textContent=JSON.stringify({run_id:selectedRun.id,engine_version:report.engine_version,engine_commit:report.engine_commit,engine_source_sha256:report.engine_source_sha256,dataset_fingerprint:report.dataset_fingerprint,dataset_sha256:selectedRun.dataset_sha256,dataset_info:selectedRun.dataset_info,effective_config:report.effective_config},null,2);
   $('assumptions').replaceChildren(...(report.assumptions||[]).map(value=>node('li',value)));
   if(report.benchmark)$('benchmark-note').textContent=report.benchmark.assumption;
 }
@@ -195,7 +229,7 @@ async function refreshHistory(){
   $('history-count').textContent=data.runs.length?String(data.runs.length):'';
   for(const run of data.runs){
     const button=node('button',null,'history-item');button.type='button';button.setAttribute('aria-current',String(run.id===selectedRun?.id));
-    const description=node('span');description.append(node('span',names[run.strategy]||run.strategy,'history-name'),node('span',(run.dataset==='opening_demo'?'Opening sessions':'Daily cycle')+' · '+new Date(typeof run.created_at==='number'?run.created_at*1000:run.created_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),'history-description'));button.title='Run '+run.id;
+    const description=node('span');description.append(node('span',names[run.strategy]||run.strategy,'history-name'),node('span',(run.dataset_info?.name||datasetInfo(run.dataset).name)+' · '+new Date(typeof run.created_at==='number'?run.created_at*1000:run.created_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),'history-description'));button.title='Run '+run.id;
     const status=node('span',run.status,'badge');status.dataset.status=run.status;
     button.append(description,status);button.addEventListener('click',()=>selectRun(run,{focus:true}).catch(e=>error(e.message)));container.append(button);
   }
@@ -205,11 +239,9 @@ async function refreshHistory(){
 async function boot(){
   parameterInputs();
   const initialFormRevision=formRevision;
-  showWorkspace(location.hash==='#saved-runs'?'history':'workbench',false);
+  showWorkspace(workspaceFromHash(),false);
   try{
-    await api('/api/catalog');
-    const updateNote=()=>{$('dataset-note').textContent=$('dataset').value==='opening_demo'?'Complete sessions, with prior history for trend filters.':'Daily candles for crossover and RSI studies.';};
-    $('dataset').addEventListener('change',updateNote);updateNote();
+    await datasetLibrary.refresh();
     const runs=await refreshHistory();
     let savedId;try{savedId=localStorage.getItem('opening-bell-selected-run');}catch{}
     if(runs.length)await selectRun(runs.find(run=>run.id===savedId)||runs[0],{reveal:false,setupRevision:initialFormRevision});
@@ -221,6 +253,7 @@ function resetQuote(){
   $('market-time').textContent='Exchange time';
 }
 function loadSavedSetup(){
+  clearValidation();error('','form-error');
   const config=report.effective_config;
   $('strategy').value=report.strategy;$('dataset').value=selectedRun.dataset;parameterInputs();
   const parameters=config.strategies[report.strategy];
@@ -238,7 +271,7 @@ function inspectPrice({bar,change,changePercent,source}){
   $('market-change').textContent=Number.isFinite(change)?`${change>=0?'+':''}${price(change)} (${change>=0?'+':''}${Number.isFinite(changePercent)?changePercent.toFixed(2):'0.00'}%)`:'—';
   $('market-change').className=change>=0?'positive':'negative';
   $('market-change').title='Change from the previous candle close';
-  $('market-time').textContent=bar.timestamp.replace('T',' · ').slice(0,18)+' · exchange time';
+  $('market-time').textContent=bar.timestamp.replace('T',' · ').slice(0,18)+' · '+(chartData?.timezone||selectedRun?.dataset_info?.timezone||'exchange time');
   for(const key of ['open','high','low','close'])$('quote-'+key).textContent=price(bar[key]);
   $('quote-volume').textContent=num(bar.volume);
   for(const key of ['vwap','ema_fast','ema_medium','ema_slow'])$('value-'+key).textContent=price(bar[key]);
@@ -261,18 +294,22 @@ function setChartControls(enabled){
 }
 async function loadMarketChart(session){
   if(!selectedRun||!report)return;
-  const run=selectedRun,version=++chartVersion;setChartControls(false);error('','market-error');
+  const run=selectedRun,version=++chartVersion;setChartControls(false);error('','market-error');$('retry-chart').hidden=true;
   $('market-chart').setAttribute('aria-busy','true');
   $('loading').hidden=false;$('loading').textContent='Loading saved candles and indicators…';
   try{
     const payload=await api('/api/runs/'+run.id+'/chart'+(session?'?session='+encodeURIComponent(session):''));
     if(version!==chartVersion||selectedRun.id!==run.id)return;
     chartData=payload;
+    const chartNotes=[];
+    if(payload.truncated)chartNotes.push('Showing the last '+num(payload.bars.length)+' of '+num(payload.total_bars)+' candles. Exports retain the complete run.');
+    if(payload.outside_session_bar_count)chartNotes.push('Includes extended hours. VWAP covers the regular session only.');
+    $('chart-data-note').textContent=chartNotes.join(' ');$('chart-data-note').hidden=!chartNotes.length;
     const selector=$('session-select');selector.replaceChildren();
     for(const date of payload.sessions){const option=node('option',journalTime(date));option.value=date;selector.append(option);}
     if(payload.session)selector.value=payload.session;else selector.append(node('option','Full history'));
     $('interval-label').textContent=payload.interval_minutes?payload.interval_minutes+'m':'1D';
-    $('market-description').textContent=payload.interval_minutes?'/ Synthetic opening sessions':'/ Synthetic daily cycle';
+    renderInstrument(payload.dataset_info||run.dataset_info||datasetInfo(run.dataset));
     $('reset-view').textContent=payload.interval_minutes?'Full session':'Full history';
     const showOpening=payload.interval_minutes!=null&&report.strategy==='VWAP_OPENING';
     $('opening-view').hidden=!showOpening;
@@ -282,7 +319,7 @@ async function loadMarketChart(session){
     marketChart.setData({...payload,opening_window_minutes:showOpening?payload.opening_window_minutes:0});
     if(showOpening)marketChart.fitToOpeningWindow();
     setChartControls(true);
-  }catch(e){if(version===chartVersion){error('Price chart unavailable: '+e.message,'market-error');$('session-select').replaceChildren(node('option','Unavailable'));marketChart.setData(null);resetQuote();}}
+  }catch(e){if(version===chartVersion){error('Price chart unavailable: '+e.message,'market-error');failedChartSession=session;$('retry-chart').hidden=false;$('session-select').replaceChildren(node('option','Unavailable'));marketChart.setData(null);resetQuote();}}
   finally{if(version===chartVersion){$('market-chart').setAttribute('aria-busy','false');$('loading').hidden=true;}}
 }
 function selectPane(name,focus=false){
@@ -304,6 +341,7 @@ for(const button of document.querySelectorAll('[data-pane]')){
 for(const view of ['candles','line'])$('view-'+view).addEventListener('click',()=>{marketChart.setView(view);for(const name of ['candles','line'])$('view-'+name).setAttribute('aria-pressed',String(name===view));});
 for(const input of document.querySelectorAll('[data-indicator]'))input.addEventListener('change',()=>marketChart.setIndicator(input.dataset.indicator,input.checked));
 $('session-select').addEventListener('change',()=>loadMarketChart($('session-select').value));
+$('retry-chart').addEventListener('click',()=>loadMarketChart(failedChartSession));
 $('opening-view').addEventListener('click',()=>marketChart.fitToOpeningWindow());
 $('reset-view').addEventListener('click',()=>marketChart.resetView());
 $('zoom-in').addEventListener('click',()=>marketChart.zoomIn());
@@ -315,11 +353,12 @@ for(const button of document.querySelectorAll('[data-window]')){
 }
 for(const link of document.querySelectorAll('[data-workspace]'))link.addEventListener('click',()=>showWorkspace(link.dataset.workspace,false));
 document.querySelector('.wordmark').addEventListener('click',()=>showWorkspace('workbench',false));
-window.addEventListener('hashchange',()=>showWorkspace(location.hash==='#saved-runs'?'history':'workbench',false));
+window.addEventListener('hashchange',()=>showWorkspace(workspaceFromHash(),false));
 setChartControls(false);
 $('run-form').addEventListener('submit',submit);
 $('run-form').addEventListener('input',markEdited);
 $('strategy').addEventListener('change',parameterInputs);
+$('dataset').addEventListener('change',updateDatasetNote);
 $('activity-filter').addEventListener('change',()=>{page=0;renderActivity();});
 $('previous-page').addEventListener('click',()=>{page--;renderActivity();});
 $('next-page').addEventListener('click',()=>{page++;renderActivity();});

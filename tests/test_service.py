@@ -1,5 +1,6 @@
 """Durability tests use real SQLite files and real process termination."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import copy
 import http.client
 import json
@@ -19,6 +20,21 @@ from service.server import LocalServer
 from service.store import Store, Conflict, StaleClaim, canonical, replay
 from service.validation import validate_request, dataset_bytes
 from service.worker import find_engine, work_once
+
+
+def import_payload():
+    return {"name": "Historical test", "symbol": "XYZ", "source": "User-supplied test export",
+            "timezone": "America/New_York", "currency": "USD", "price_adjustment": "unknown",
+            "bar_minutes": 2, "session_open_minute": 570, "session_close_minute": 960,
+            "csv": "timestamp,open,high,low,close,volume\n"
+                   "2025-01-02 09:30:00,100,102,99,101,500\n"
+                   "2025-01-02 09:32:00,101,103,100,102,600\n"
+                   "2025-01-02 09:34:00,102,104,101,103,700\n"}
+
+
+def validated_import():
+    from service.import_data import validate_import
+    return validate_import(import_payload())
 
 
 def example_result():
@@ -221,6 +237,142 @@ class StoreTests(unittest.TestCase):
                 self.assertTrue(self.store.reconcile(run["id"])["ok"])
                 self.assertTrue(self.store.result(run["id"])["engine_version"])
 
+    def test_import_deduplication_persists_and_metadata_is_immutable(self):
+        metadata, content = validated_import()
+        first, created = self.store.import_dataset(metadata, content)
+        self.assertTrue(created)
+        self.assertRegex(first["id"], r"^import_[a-f0-9]{64}$")
+        reopened = Store(self.path)
+        second, created = reopened.import_dataset(metadata, content)
+        self.assertFalse(created)
+        self.assertEqual(second, first)
+        self.assertEqual(reopened.resolve_dataset(first["id"]), (first, content))
+        self.assertEqual(len(reopened.imported_datasets()), 1)
+        for statement in ("UPDATE imported_datasets SET metadata='{}'", "DELETE FROM imported_datasets"):
+            with reopened.connect() as db, self.assertRaises(sqlite3.IntegrityError):
+                db.execute(statement)
+
+    def test_concurrent_imports_create_one_immutable_dataset(self):
+        metadata, content = validated_import()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: self.store.import_dataset(metadata, content), range(16)))
+        self.assertEqual(sum(created for _, created in results), 1)
+        self.assertEqual(len({dataset["id"] for dataset, _ in results}), 1)
+
+    def test_import_capacity_preserves_identical_retries(self):
+        metadata, content = validated_import()
+        first, _ = self.store.import_dataset(metadata, content)
+        for i in range(49):
+            self.store.import_dataset({**metadata, "name": f"distinct-{i}"}, content)
+        with self.assertRaisesRegex(Conflict, "capacity"):
+            self.store.import_dataset({**metadata, "name": "over-limit"}, content)
+        retry, created = self.store.import_dataset(metadata, content)
+        self.assertFalse(created)
+        self.assertEqual(retry["id"], first["id"])
+        with self.assertRaisesRegex(ValueError, "8 MiB"):
+            self.store.import_dataset(metadata, b"x" * (8 * 1024 * 1024 + 1))
+
+    def test_imported_run_snapshot_and_published_provenance(self):
+        metadata, content = validated_import()
+        imported, _ = self.store.import_dataset(metadata, content)
+        payload = validate_request({"request_id": "historical", "dataset": imported["id"], "strategy": "VWAP_OPENING"},
+                                   extra_datasets={imported["id"]: imported})
+        run, _ = self.store.submit(payload, content)
+        self.assertEqual(run["dataset_info"], imported)
+        claim = self.store.claim()
+        self.assertEqual(claim["dataset_bytes"], content)
+        effective = json.loads(claim["payload"])["config"]
+        self.assertEqual(effective["backtesting"]["symbol"], "XYZ")
+        self.assertEqual(effective["strategies"]["VWAP_OPENING"]["bar_minutes"], 2)
+        self.store.publish(claim, example_result())
+        self.assertEqual(self.store.result(run["id"])["provenance"]["dataset_info"], imported)
+        bad_payload = {**payload, "request_id": "mismatching-snapshot"}
+        with self.assertRaisesRegex(ValueError, "immutable import"):
+            self.store.submit(bad_payload, b"replacement data")
+
+    def test_imported_csv_executes_real_engine_with_declared_symbol(self):
+        try:
+            engine = find_engine(os.environ.get("TRADING_BOT_ENGINE"))
+        except ValueError:
+            self.skipTest("Build the C++ engine or set TRADING_BOT_ENGINE to run integration")
+        metadata, content = validated_import()
+        imported, _ = self.store.import_dataset(metadata, content)
+        request = validate_request({"request_id": "import-engine", "dataset": imported["id"],
+                                    "strategy": "VWAP_OPENING"}, {imported["id"]: imported})
+        run, _ = self.store.submit(request, content)
+        self.assertTrue(work_once(self.store, engine), self.store.get(run["id"])["error"])
+        result = self.store.result(run["id"])
+        self.assertEqual(result["effective_config"]["backtesting"]["symbol"], "XYZ")
+        self.assertEqual(result["results"]["total_trades"], 0)  # Too little history for confirmed trends.
+        self.assertEqual(result["provenance"]["dataset_info"]["original_sha256"], imported["original_sha256"])
+        self.assertTrue(self.store.reconcile(run["id"])["ok"])
+
+    def test_legacy_schema_adds_metadata_without_rewriting_results(self):
+        # Reproduce the previous schema on a separate database before startup.
+        path = Path(self.temporary.name) / "legacy.sqlite3"
+        old = Store(path)
+        old.initialize()
+        legacy, _ = old.submit(self.payload, b"original snapshot")
+        old.publish(old.claim(), example_result())
+        before = old.result(legacy["id"])
+        with old.connect() as db:
+            db.execute("ALTER TABLE runs DROP COLUMN dataset_info")
+        old.initialize()
+        self.assertEqual(old.result(legacy["id"]), before)
+        self.assertEqual(old.get(legacy["id"])["dataset_info"]["origin"], "synthetic")
+
+    def test_concurrent_legacy_initialization_migrates_once_preserving_history(self):
+        old = Store(Path(self.temporary.name) / "concurrent-legacy.sqlite3")
+        old.initialize()
+        legacy, _ = old.submit(self.payload, b"original snapshot")
+        old.publish(old.claim(), example_result())
+        before = old.result(legacy["id"])
+        original_events = old.events(legacy["id"])
+        with old.connect() as db:
+            db.execute("ALTER TABLE runs DROP COLUMN dataset_info")
+
+        class PausingConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def execute(self, query, *args, **kwargs):
+                cursor = self.connection.execute(query, *args, **kwargs)
+                if query == "PRAGMA table_info(runs)":
+                    rows = list(cursor)
+                    # Simulate preemption after reading the old schema. Without
+                    # a write transaction, competing startups see the same
+                    # missing column and race to add it from stale snapshots.
+                    time.sleep(.05)
+                    return rows
+                return cursor
+
+        class PausingStore(Store):
+            @contextmanager
+            def connect(self):
+                with super().connect() as db:
+                    yield PausingConnection(db)
+
+        start = threading.Barrier(8)
+
+        def initialize(_):
+            worker = PausingStore(old.path)
+            start.wait(timeout=5)
+            worker.initialize()
+            return worker.get(legacy["id"])["status"]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            statuses = list(pool.map(initialize, range(8)))
+        self.assertEqual(statuses, ["completed"] * 8)
+        self.assertEqual(old.result(legacy["id"]), before)
+        self.assertEqual(old.events(legacy["id"]), original_events)
+        with old.connect() as db:
+            columns = [row["name"] for row in db.execute("PRAGMA table_info(runs)")]
+            self.assertEqual(columns.count("dataset_info"), 1)
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
 
 class ValidationTests(unittest.TestCase):
     def test_unsafe_payloads_rejected(self):
@@ -238,6 +390,28 @@ class ValidationTests(unittest.TestCase):
         payload = validate_request({"request_id": "vwap", "dataset": "opening_demo", "strategy": "VWAP_OPENING",
                                     "config": {"strategies": {"VWAP_OPENING": {"opening_window_minutes": 15}}}})
         self.assertEqual(payload["config"]["strategies"]["VWAP_OPENING"]["opening_window_minutes"], 15)
+
+    def test_import_settings_match_immutable_metadata(self):
+        metadata, _ = validated_import()
+        metadata["bar_minutes"] = 10
+        base = {"request_id": "settings", "dataset": "import_registered", "strategy": "VWAP_OPENING"}
+        extra = {"import_registered": metadata}
+        normalized = validate_request(base, extra)
+        params = normalized["config"]["strategies"]["VWAP_OPENING"]
+        self.assertEqual(params["exit_buffer_minutes"], 10)
+        self.assertEqual(params["session_open_minute"], 570)
+        self.assertNotIn("config", base)
+        for config in ({"backtesting": {"symbol": "OTHER"}},
+                       {"strategies": {"VWAP_OPENING": {"bar_minutes": 2}}},
+                       {"strategies": {"VWAP_OPENING": {"session_open_minute": 600}}},
+                       {"strategies": {"VWAP_OPENING": {"session_close_minute": 990}}},
+                       {"strategies": {"VWAP_OPENING": {"exit_buffer_minutes": 4}}}):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                validate_request({**base, "config": config}, extra)
+        with self.assertRaisesRegex(ValueError, "intraday"):
+            validate_request(base, {"import_registered": {**metadata, "bar_minutes": 0}})
+        with self.assertRaisesRegex(ValueError, "unknown dataset"):
+            validate_request({**base, "dataset": "import_unregistered"}, extra)
 
 
 class HttpTests(unittest.TestCase):
@@ -298,6 +472,52 @@ class HttpTests(unittest.TestCase):
 
     def test_traversal_and_oversized_body_rejected(self):
         self.assertEqual(self.request("GET", "/%2e%2e/config.json")[0], 404)
+        self.assertEqual(self.request("POST", "/api/runs", {"request_id": "x" * 40000})[0], 400)
+
+    def test_import_catalog_submission_and_restart_persistence(self):
+        payload = import_payload()
+        status, response = self.request("POST", "/api/datasets/import", payload)
+        self.assertEqual(status, 201, response)
+        dataset = response["dataset"]
+        retry_status, retry = self.request("POST", "/api/datasets/import", payload)
+        self.assertEqual(retry_status, 200)
+        self.assertFalse(retry["created"])
+        self.assertEqual(retry["dataset"]["id"], dataset["id"])
+        catalog_result = self.request("GET", "/api/catalog")[1]
+        self.assertIn(dataset, catalog_result["datasets"])
+        status, run_response = self.request("POST", "/api/runs", {
+            "request_id": "http-historical", "dataset": dataset["id"], "strategy": "VWAP_OPENING"})
+        self.assertEqual(status, 201, run_response)
+        run = run_response["run"]
+        self.assertEqual(run["dataset_info"]["source"], payload["source"])
+        reopened = Store(self.server.store.path)
+        reopened.initialize()
+        self.assertEqual(reopened.get(run["id"])["dataset_info"], dataset)
+        self.assertEqual(reopened.imported_datasets(), [dataset])
+        self.assertEqual(self.request("POST", "/api/runs", {
+            "request_id": "unknown", "dataset": "import_" + "f" * 64, "strategy": "RSI"})[0], 400)
+
+    def test_bad_import_is_atomic_and_cannot_bypass_origin(self):
+        payload = import_payload()
+        bad = {**payload, "csv": "timestamp,open,high,low,close,volume\ninvalid,NaN,0,0,0,0\n"}
+        self.assertEqual(self.request("POST", "/api/datasets/import", bad)[0], 400)
+        self.assertEqual(self.server.store.imported_datasets(), [])
+        with self.server.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM datasets").fetchone()[0], 0)
+        self.assertEqual(self.request("POST", "/api/datasets/import", payload,
+                                      headers={"Origin": "https://foreign.example"})[0], 403)
+
+    def test_import_route_allows_larger_body_without_changing_run_limit(self):
+        from datetime import datetime, timedelta
+        payload = import_payload()
+        payload["bar_minutes"] = 0
+        start = datetime(2020, 1, 1)
+        payload["csv"] = "timestamp,open,high,low,close,volume\n" + "".join(
+            f"{(start + timedelta(days=i)).strftime('%Y-%m-%d')},100,102,99,101,500\n" for i in range(1500))
+        self.assertGreater(len(json.dumps(payload)), 32768)
+        status, response = self.request("POST", "/api/datasets/import", payload)
+        self.assertEqual(status, 201, response)
+        self.assertEqual(response["dataset"]["bar_minutes"], 0)
         self.assertEqual(self.request("POST", "/api/runs", {"request_id": "x" * 40000})[0], 400)
 
 

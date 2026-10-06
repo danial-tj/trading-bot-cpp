@@ -8,4 +8,22 @@ These generated numbers contain no third-party market data. They are bundled as 
 
 `sample_data.csv` is a pre-existing small fixture retained for compatibility/history. It contains January 1, 2023 minute timestamps (a Sunday), and is not used as the new daily demo. Its historical provider/source was not established; it is not represented as real market data.
 
-The CLI accepts your own validated CSV. Fields must be `timestamp,open,high,low,close,volume`, finite positive consistent OHLC, nonnegative volume, and strictly increasing unique canonical timestamps. Opening VWAP requires full intraday regular sessions at the configured bar interval, exchange-local clock timestamps, and sufficient prior completed weeks/months. The browser accepts only bundled datasets.
+## Import your own historical data
+
+Use the browser's **Data → Import CSV** form to register one symbol's UTF-8 file locally, review warnings, then select it for a backtest. Supply a dataset name, symbol, source, timezone, currency, price-adjustment status, candle interval and regular-session hours. `origin: imported` means user-provided: no source, licensing or market-accuracy verification is performed. The app does not fetch prices or connect to a live feed. Tests use controlled fixtures and do not establish real-market-data performance.
+
+The import contract is stricter than merely parsing numbers:
+
+- Exactly six ordered columns: `timestamp,open,high,low,close,volume`; `date` or `datetime` may replace the first header. Header case and surrounding whitespace are normalized. Blank rows are ignored.
+- Finite decimal OHLC prices from **0.005 through 10,000,000**, with consistent high/low bounds; volume from **0 through 1,000,000,000,000,000**. Numeric formulas, NaN/infinity and malformed values are rejected.
+- Unique, strictly increasing Gregorian timestamps in years **1900–9999**. Daily input uses `YYYY-MM-DD`; intraday input uses naive exchange-local `YYYY-MM-DDTHH:MM[:00]` or a space in place of `T`. Offsets, `Z`, nonzero seconds and mixed daily/intraday input are rejected.
+- `bar_minutes: 0` means daily; intraday accepts **1–30 minutes**, aligned to the declared session open. The interval must divide the same-date session duration. Session close must follow open; overnight sessions are unsupported.
+- Both submitted and canonical CSV are limited to **8 MiB**, with at most **100,000 rows** and **50 imported datasets** per database. The local import JSON envelope is limited to **12 MiB**; simulation requests remain limited to **32 KiB**.
+
+The canonical snapshot normalizes headers, timestamp spelling, decimal formatting and line endings without fabricating bars or changing adjustment conventions. `original_sha256` fingerprints the submitted UTF-8 CSV text; `dataset_sha256` fingerprints the canonical bytes used by the engine. Immutable dataset IDs include the canonical data and metadata, including original provenance. Imports appear in the local registry and every saved run captures its metadata. See [the service/API contract](../docs/SERVICE.md) for payloads and retry behavior.
+
+Timezone is a declared UTC or IANA-style label, not a timezone/DST conversion. Timestamps must already use the intended local exchange clock. Currency is an uppercase three-letter simulation label, not FX conversion. Adjustment status is declared as `unknown`, `unadjusted`, `split_adjusted` or `split_and_dividend_adjusted`; the app does not apply splits or dividends. Fixed session hours do not establish an exchange calendar: missing whole sessions, holidays and half days are not validated.
+
+Observed gaps, incomplete regular sessions, extended-hours rows and zero volume generate warnings where applicable and remain in the snapshot. Opening VWAP requires complete regular-session history and enough prior completed weeks/months; it excludes extended-hours bars. SMA, EMA and RSI process all supplied bars. Their charts retain extended-hours candles/fills and full EMA history, while the reference session VWAP stays regular-hours-only. Daily data supports SMA, EMA and RSI, with no session VWAP.
+
+An accepted import may still exceed the worker's separate **64 MiB result limit**; use a smaller backtest date range or input file if necessary. The CLI also accepts CSV paths directly, without registering them in the browser's local library.

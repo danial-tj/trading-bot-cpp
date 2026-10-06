@@ -45,7 +45,21 @@ def report_fixture():
                         "cost_basis_after_cents": 0, "realized_pnl_after_cents": 0}]}}
 
 
-RUN = {"id": "1" * 32, "dataset": "opening_demo", "dataset_sha256": "test-fingerprint"}
+RUN = {"id": "1" * 32, "dataset": "opening_demo", "strategy": "VWAP_OPENING",
+       "dataset_sha256": "test-fingerprint"}
+
+
+def imported_info(kind="intraday"):
+    return {"origin": "imported", "name": "User-provided sample", "symbol": "ACME",
+            "source": "User CSV export; provider not independently verified",
+            "timezone": "America/Toronto", "currency": "CAD", "price_adjustment": "unadjusted",
+            "interval_kind": kind, "kind": kind, "bar_minutes": 5 if kind == "intraday" else 0,
+            "session_open_minute": 480, "session_close_minute": 500}
+
+
+IMPORTED_ROWS = [("2025-01-02T08:00:00", 10, 10), ("2025-01-02T08:05:00", 12, 30),
+                 ("2025-01-02T08:10:00", 14, 20), ("2025-01-02T08:15:00", 16, 20),
+                 ("2025-01-03T08:00:00", 20, 10), ("2025-01-03T08:05:00", 22, 30)]
 
 
 class ChartProjectionTests(unittest.TestCase):
@@ -142,6 +156,143 @@ class ChartProjectionTests(unittest.TestCase):
         self.assertEqual(build_chart(RUN, report, csv_bytes(ROWS))["interval_minutes"], 2)
 
 
+class ImportedChartTests(unittest.TestCase):
+    def test_non_vwap_retains_extended_hours_candles_fills_and_ema_history(self):
+        metadata = imported_info()
+        rows = [("2025-01-02T07:55:00", 100, 10000), *IMPORTED_ROWS[:4],
+                ("2025-01-02T08:20:00", 200, 20000)]
+        report = report_fixture()
+        fills = [{"timestamp": rows[0][0], "action": "BUY", "price": 99.5, "quantity": 2},
+                 {"timestamp": rows[-1][0], "action": "SELL", "price": 199.5, "quantity": 2}]
+        report["results"]["trades"] = fills
+        report["results"]["rejections"] = [{"timestamp": rows[0][0], "action": "BUY", "reason": "test rejection"}]
+        for strategy in ("SMA_CROSSOVER", "EMA_CROSSOVER", "RSI"):
+            run = {**RUN, "dataset": "import_extended", "strategy": strategy, "dataset_info": metadata}
+            with self.subTest(strategy=strategy):
+                chart = build_chart(run, report, csv_bytes(rows))
+                self.assertFalse(chart["regular_session_only"])
+                self.assertEqual(chart["outside_session_bar_count"], 2)
+                self.assertEqual(chart["indicator_scope"], {"ema": "all_observed_bars", "vwap": "regular_session_only"})
+                self.assertEqual([bar["timestamp"] for bar in chart["bars"]], [row[0] for row in rows])
+                self.assertEqual(chart["trades"], fills)
+                self.assertEqual(chart["rejections"], report["results"]["rejections"])
+                self.assertEqual(chart["bars"][1]["ema_fast"], 55)
+                self.assertEqual(chart["bars"][3]["ema_slow"], 34)
+                self.assertAlmostEqual(chart["bars"][-1]["ema_slow"], 96.08)
+                self.assertIsNone(chart["bars"][0]["vwap"])
+                self.assertIsNone(chart["bars"][-1]["vwap"])
+                self.assertAlmostEqual(chart["bars"][1]["vwap"], 10 - 1 / 3)
+                self.assertAlmostEqual(chart["bars"][2]["vwap"], ((10 - 1 / 3) * 10 + (12 - 1 / 3) * 30) / 40)
+
+    def test_active_vwap_excludes_extended_hours_from_candles_and_ema(self):
+        metadata = imported_info()
+        rows = [("2025-01-02T07:55:00", 100, 10000), *IMPORTED_ROWS[:4],
+                ("2025-01-02T08:20:00", 200, 20000)]
+        report = report_fixture()
+        report["effective_config"]["strategies"]["VWAP_OPENING"].update(
+            {key: metadata[key] for key in ("bar_minutes", "session_open_minute", "session_close_minute")})
+        run = {**RUN, "dataset": "import_extended", "dataset_info": metadata}
+        chart = build_chart(run, report, csv_bytes(rows))
+        self.assertTrue(chart["regular_session_only"])
+        self.assertEqual(chart["outside_session_bar_count"], 0)
+        self.assertEqual(chart["indicator_scope"]["ema"], "regular_session_bars")
+        self.assertEqual([bar["timestamp"] for bar in chart["bars"]], [row[0] for row in IMPORTED_ROWS[:4]])
+        self.assertIsNone(chart["bars"][0]["ema_fast"])
+        self.assertEqual(chart["bars"][1]["ema_fast"], 11)
+        self.assertEqual(chart["bars"][-1]["ema_slow"], 13)
+        self.assertAlmostEqual(chart["bars"][0]["vwap"], 10 - 1 / 3)
+
+    def test_extended_only_date_remains_selectable_for_non_vwap(self):
+        metadata = imported_info()
+        rows = [*IMPORTED_ROWS, ("2025-01-04T07:55:00", 30, 1000), ("2025-01-04T08:20:00", 40, 1000)]
+        run = {**RUN, "dataset": "import_extended", "strategy": "EMA_CROSSOVER", "dataset_info": metadata}
+        chart = build_chart(run, report_fixture(), csv_bytes(rows), "2025-01-04")
+        self.assertEqual(len(chart["bars"]), 2)
+        self.assertEqual(chart["outside_session_bar_count"], 2)
+        self.assertIn("2025-01-04", chart["sessions"])
+        self.assertTrue(all(bar["vwap"] is None for bar in chart["bars"]))
+        self.assertIsNotNone(chart["bars"][0]["ema_slow"])
+
+    def test_imported_crossover_uses_five_minute_metadata_not_unused_vwap_defaults(self):
+        metadata = imported_info()
+        run = {**RUN, "dataset": "import_fixture", "strategy": "EMA_CROSSOVER", "dataset_info": metadata}
+        report = report_fixture()
+        report["effective_config"]["strategies"]["VWAP_OPENING"].update(
+            bar_minutes=2, session_open_minute=570, session_close_minute=960)
+        chart = build_chart(run, report, csv_bytes(IMPORTED_ROWS))
+        self.assertEqual(chart["interval_minutes"], 5)
+        self.assertEqual(chart["session_open_minute"], 480)
+        self.assertEqual(chart["session_close_minute"], 500)
+        self.assertEqual(chart["session"], "2025-01-03")
+        self.assertEqual(chart["sessions"], ["2025-01-02", "2025-01-03"])
+        self.assertEqual(len(chart["bars"]), 2)
+        self.assertAlmostEqual(chart["bars"][0]["ema_slow"], 13 + 2 / 5 * (20 - 13))
+        self.assertAlmostEqual(chart["bars"][0]["vwap"], 20 - 1 / 3)
+        self.assertEqual(chart["origin"], "imported")
+        self.assertFalse(chart["synthetic"])
+        self.assertEqual(chart["dataset_info"], metadata)
+        self.assertEqual(chart["symbol"], "ACME")
+        self.assertEqual(chart["currency"], "CAD")
+        self.assertEqual(chart["timezone"], "America/Toronto")
+        self.assertNotIn("verified", chart)
+        changed = IMPORTED_ROWS[:-1] + [(IMPORTED_ROWS[-1][0], 999, 10000)]
+        self.assertEqual(chart["bars"][:-1], build_chart(run, report, csv_bytes(changed))["bars"][:-1])
+
+    def test_active_imported_vwap_requires_saved_cadence_and_session_agreement(self):
+        metadata = imported_info()
+        run = {**RUN, "dataset": "import_fixture", "strategy": "VWAP_OPENING", "dataset_info": metadata}
+        report = report_fixture()
+        parameters = report["effective_config"]["strategies"]["VWAP_OPENING"]
+        parameters.update({key: metadata[key] for key in ("bar_minutes", "session_open_minute", "session_close_minute")})
+        self.assertEqual(build_chart(run, report, csv_bytes(IMPORTED_ROWS))["interval_minutes"], 5)
+        for key, invalid in (("bar_minutes", 2), ("session_open_minute", 475), ("session_close_minute", 505)):
+            changed = copy.deepcopy(report)
+            changed["effective_config"]["strategies"]["VWAP_OPENING"][key] = invalid
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, f"saved VWAP {key}"):
+                build_chart(run, changed, csv_bytes(IMPORTED_ROWS))
+
+    def test_imported_daily_retains_source_metadata_and_has_no_session_vwap(self):
+        metadata = imported_info("daily")
+        run = {**RUN, "dataset": "import_daily", "strategy": "RSI", "dataset_info": metadata}
+        rows = [(f"2025-01-0{day}", 100 + day, 1000) for day in range(1, 6)]
+        chart = build_chart(run, report_fixture(), csv_bytes(rows))
+        self.assertEqual(chart["dataset_info"], metadata)
+        self.assertEqual(chart["origin"], "imported")
+        self.assertFalse(chart["synthetic"])
+        self.assertIsNone(chart["interval_minutes"])
+        self.assertIsNone(chart["session"])
+        self.assertEqual(chart["sessions"], [])
+        self.assertEqual(len(chart["bars"]), 5)
+        self.assertTrue(all(bar["vwap"] is None for bar in chart["bars"]))
+        self.assertEqual(chart["bars"][3]["ema_slow"], 102.5)
+        with self.assertRaisesRegex(ValueError, "requires an intraday"):
+            build_chart({**run, "strategy": "VWAP_OPENING"}, report_fixture(), csv_bytes(rows))
+
+    def test_saved_metadata_must_match_timestamp_kind_and_grid(self):
+        run = {**RUN, "dataset": "import_fixture", "strategy": "EMA_CROSSOVER", "dataset_info": imported_info()}
+        for changed, message in (({"interval_kind": "daily", "kind": "daily"}, "kind"),
+                                 ({"bar_minutes": 3}, "interval"),
+                                 ({"kind": "daily"}, "kinds disagree")):
+            invalid = {**run, "dataset_info": {**run["dataset_info"], **changed}}
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, message):
+                build_chart(invalid, report_fixture(), csv_bytes(IMPORTED_ROWS))
+
+    def test_saved_report_metadata_fallback_and_legacy_origin(self):
+        report = report_fixture()
+        report["provenance"] = {"dataset_info": imported_info()}
+        run = {**RUN, "dataset": "import_fixture", "strategy": "EMA_CROSSOVER"}
+        chart = build_chart(run, report, csv_bytes(IMPORTED_ROWS))
+        self.assertEqual(chart["origin"], "imported")
+        self.assertEqual(chart["symbol"], "ACME")
+        legacy = build_chart(RUN, report_fixture(), csv_bytes(ROWS))
+        self.assertTrue(legacy["synthetic"])
+        self.assertEqual(legacy["origin"], "synthetic")
+        self.assertEqual(legacy["symbol"], "TEST")
+        unknown = build_chart({**RUN, "dataset": "missing_info"}, report_fixture(), csv_bytes(ROWS))
+        self.assertFalse(unknown["synthetic"])
+        self.assertEqual(unknown["origin"], "unknown")
+
+
 class SavedChartTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -177,6 +328,27 @@ class SavedChartTests(unittest.TestCase):
         self.assertEqual(before, canonical(self.store.result(self.run["id"])))
         self.assertEqual(before_run, self.store.get(self.run["id"]))
         self.assertTrue(self.store.reconcile(self.run["id"])["ok"])
+
+    def test_imported_chart_uses_metadata_captured_with_the_completed_run(self):
+        self.complete()
+        metadata = imported_info()
+        content = csv_bytes(IMPORTED_ROWS)
+        dataset, created = self.store.import_dataset(metadata, content)
+        self.assertTrue(created)
+        payload = {"request_id": "imported-chart", "dataset": dataset["id"],
+                   "strategy": "EMA_CROSSOVER", "config": {}}
+        run, _ = self.store.submit(payload, content, dataset_info=dataset)
+        self.store.publish(self.store.claim(), report_fixture())
+        saved_info = copy.deepcopy(self.store.get(run["id"])["dataset_info"])
+        dataset["symbol"] = "CHANGED"
+        metadata["bar_minutes"] = 2
+        chart = chart_for_run(self.store, run["id"])
+        self.assertEqual(chart["dataset_info"], saved_info)
+        self.assertEqual(chart["symbol"], "ACME")
+        self.assertEqual(chart["interval_minutes"], 5)
+        self.assertEqual(chart["dataset_sha256"], hashlib.sha256(content).hexdigest())
+        self.assertEqual(self.store.dataset_snapshot(run["id"]), content)
+        self.assertTrue(self.store.reconcile(run["id"])["ok"])
 
     def test_endpoint_handles_selection_and_bad_queries(self):
         self.complete()

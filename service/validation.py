@@ -1,16 +1,25 @@
-"""Public API accepts bounded configuration and bundled dataset IDs only."""
+"""Public API accepts bounded configuration and registered dataset IDs only."""
+import copy
 import math
 from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parent.parent
 DATASETS = {
-    "sample": {"name": "Synthetic daily cycle", "file": "daily_demo.csv", "description": "Synthetic weekday daily OHLCV cycle. Not market performance evidence."},
-    "opening_demo": {"name": "Opening VWAP demo", "file": "opening_demo.csv", "description": "Synthetic two-minute bars with weekly/monthly warm-up. Not market performance evidence."},
+    "sample": {"name": "Synthetic daily cycle", "file": "daily_demo.csv", "description": "Synthetic weekday daily OHLCV cycle. Not market performance evidence.",
+               "origin": "synthetic", "symbol": "SIM", "kind": "daily", "interval_kind": "daily", "bar_minutes": 0,
+               "timezone": "exchange-local demo", "currency": "USD", "price_adjustment": "unadjusted",
+               "source": "Bundled synthetic fixture", "session_open_minute": 570, "session_close_minute": 960},
+    "opening_demo": {"name": "Opening VWAP demo", "file": "opening_demo.csv", "description": "Synthetic two-minute bars with weekly/monthly warm-up. Not market performance evidence.",
+                     "origin": "synthetic", "symbol": "SIM", "kind": "intraday", "interval_kind": "intraday", "bar_minutes": 2,
+                     "timezone": "exchange-local demo", "currency": "USD", "price_adjustment": "unadjusted",
+                     "source": "Bundled synthetic fixture", "session_open_minute": 570, "session_close_minute": 960},
 }
 STRATEGIES = ("SMA_CROSSOVER", "EMA_CROSSOVER", "RSI", "VWAP_OPENING")
 MAX_DATASET_BYTES = 8 * 1024 * 1024
 MAX_BODY_BYTES = 32 * 1024
+MAX_IMPORT_BODY_BYTES = 12 * 1024 * 1024
+MAX_IMPORTED_DATASETS = 50
 
 # Config names mirror the engine contract. The engine also validates relationships.
 NUMBERS = {
@@ -57,13 +66,15 @@ def validate_section(name, section):
             raise ValueError(f"unsupported configuration: {name}.{key}")
 
 
-def validate_request(payload):
+def validate_request(payload, extra_datasets=None):
     if not isinstance(payload, dict) or set(payload) - {"request_id", "dataset", "strategy", "config"}:
         raise ValueError("request must contain request_id, dataset, strategy, and optional config")
     if not isinstance(payload.get("request_id"), str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", payload["request_id"]):
         raise ValueError("request_id must be 1-128 letters, digits, or ._:- characters")
-    if payload.get("dataset") not in DATASETS:
-        raise ValueError("unknown dataset; use a bundled dataset ID")
+    extra_datasets = extra_datasets or {}
+    dataset_id = payload.get("dataset")
+    if not isinstance(dataset_id, str) or (dataset_id not in DATASETS and dataset_id not in extra_datasets):
+        raise ValueError("unknown dataset; use a bundled or registered dataset ID")
     if payload.get("strategy") not in STRATEGIES:
         raise ValueError("unknown strategy")
     config = payload.get("config", {})
@@ -77,6 +88,27 @@ def validate_request(payload):
             raise ValueError("unsupported strategies configuration")
         for name, section in config["strategies"].items():
             validate_section(name, section)
+    if dataset_id in extra_datasets:
+        metadata = extra_datasets[dataset_id]
+        config = copy.deepcopy(config)
+        backtesting = config.setdefault("backtesting", {})
+        if "symbol" in backtesting and backtesting["symbol"] != metadata["symbol"]:
+            raise ValueError("backtesting.symbol must match the imported dataset symbol")
+        backtesting["symbol"] = metadata["symbol"]
+        configured_vwap = config.get("strategies", {}).get("VWAP_OPENING")
+        if payload["strategy"] == "VWAP_OPENING" or configured_vwap is not None:
+            if metadata["bar_minutes"] == 0:
+                if payload["strategy"] == "VWAP_OPENING":
+                    raise ValueError("VWAP_OPENING requires an intraday dataset")
+            else:
+                settings = config.setdefault("strategies", {}).setdefault("VWAP_OPENING", {})
+                for key in ("bar_minutes", "session_open_minute", "session_close_minute"):
+                    if key in settings and settings[key] != metadata[key]:
+                        raise ValueError(f"VWAP_OPENING.{key} must match imported dataset metadata")
+                    settings[key] = metadata[key]
+                settings.setdefault("exit_buffer_minutes", max(4, metadata["bar_minutes"]))
+                if settings["exit_buffer_minutes"] < metadata["bar_minutes"]:
+                    raise ValueError("VWAP_OPENING.exit_buffer_minutes must be at least bar_minutes")
     return {"request_id": payload["request_id"], "dataset": payload["dataset"],
             "strategy": payload["strategy"], "config": config}
 
@@ -88,15 +120,21 @@ def dataset_bytes(dataset):
     return path.read_bytes()
 
 
-def catalog():
+def preset_info(dataset):
+    value = DATASETS.get(dataset)
+    return {"id": dataset, **{k: v for k, v in value.items() if k != "file"}} if value else {}
+
+
+def catalog(imported_datasets=None):
     return {
-        "datasets": [{"id": key, **{k: v for k, v in value.items() if k != "file"}} for key, value in DATASETS.items()],
+        "datasets": [preset_info(key) for key in DATASETS] + list(imported_datasets or []),
         "strategies": [{"id": key, "name": key.replace("_", " ").title()} for key in STRATEGIES],
         "defaults": {"dataset": "opening_demo", "strategy": "VWAP_OPENING",
                      "backtesting": {"initial_capital": 10000, "commission_rate": .001,
                                      "commission_fixed": 0, "slippage": .0001},
                      "risk_management": {"max_position_size": .1}},
         "limits": {"max_request_bytes": MAX_BODY_BYTES, "max_dataset_bytes": MAX_DATASET_BYTES,
+                   "max_import_request_bytes": MAX_IMPORT_BODY_BYTES, "max_imported_datasets": MAX_IMPORTED_DATASETS,
                    "engine_timeout_seconds": 60, "list_runs": 100, "max_active_runs": 50,
                    "max_total_runs": 1000, "execution": "local simulation only"},
     }

@@ -1,6 +1,6 @@
 # Durable local simulation service
 
-The Python standard-library service runs the C++ engine as a bounded child process. SQLite stores request identity, immutable dataset snapshots, worker ownership, results, and the complete accounting event history. Each backtest owns an independent portfolio. The service has no broker connection, account credentials, uploads, or live execution.
+The Python standard-library service runs the C++ engine as a bounded child process. SQLite stores request identity, immutable dataset snapshots and import metadata, worker ownership, results, and the complete accounting event history. Each backtest owns an independent portfolio. Historical CSV files can be imported into the local service; there is no external data fetch, live feed, broker connection, account credentials or live execution.
 
 ## Start and use
 
@@ -22,7 +22,8 @@ Responses are JSON. Requests must use `Content-Type: application/json`. `Host` m
 
 | Route | Behavior |
 | --- | --- |
-| `GET /api/catalog` | Bundled dataset IDs, supported strategies, defaults, and workload limits |
+| `GET /api/catalog` | Bundled and imported dataset metadata/IDs, supported strategies, defaults, and workload limits |
+| `POST /api/datasets/import` | Validate CSV text plus metadata; return `{dataset,created}` with an immutable local dataset ID |
 | `POST /api/runs` | Submit `{request_id,dataset,strategy,config?}`; return `{run,created}` |
 | `GET /api/runs` | Return `{runs}` with the 100 most recent submissions |
 | `GET /api/runs/ID` | Return `{run}` including status, attempt, error, and dataset SHA-256 |
@@ -46,19 +47,33 @@ Example request:
 }
 ```
 
-`sample` selects `data/daily_demo.csv`; `opening_demo` selects `data/opening_demo.csv`. Both are synthetic and do not establish market performance. Users cannot supply filesystem paths through the API. Strategy names are `SMA_CROSSOVER`, `EMA_CROSSOVER`, `RSI`, and `VWAP_OPENING`.
+`sample` selects `data/daily_demo.csv`; `opening_demo` selects `data/opening_demo.csv`. Both are synthetic and do not establish market performance. An imported dataset is selected using the `import_...` ID returned by the import route or catalog. Users cannot supply filesystem paths through the API. Strategy names are `SMA_CROSSOVER`, `EMA_CROSSOVER`, `RSI`, and `VWAP_OPENING`.
 
 Successful first submission returns HTTP 201. An identical retry returns 200 and the existing run, including after a service restart or lost response. Reusing `request_id` with a different normalized JSON payload returns 409. Object key ordering is normalized; configuration values remain part of request identity. An omitted config is normalized to `{}`. Use a new request ID for a deliberately new run.
 
 Validation errors return 400, unknown runs/routes 404, unavailable results and terminal-state conflicts 409. Execution/configuration errors found by the engine mark the run `failed` and retain its error. No-trade results are successful runs.
 
+## Local CSV imports
+
+In the browser's **Data** tab, choose a UTF-8 CSV, enter its metadata, and use **Validate & import**. Review the resulting data-quality warnings and select the dataset to return to the workbench. This imports bytes into the local SQLite database; it does not connect to the stated provider. `origin: "imported"` records user-supplied data, not independently verified source, licensing or market authenticity.
+
+The import JSON contains required `name`, `symbol`, `source`, `timezone`, `currency`, `price_adjustment` and `csv` strings. It also accepts integer `bar_minutes` (0 for daily, 1–30 for intraday), `session_open_minute` and `session_close_minute` (minutes after midnight; defaults 570/960). Session close must follow open on the same date, and the intraday interval must divide that duration. `price_adjustment` is `unknown`, `unadjusted`, `split_adjusted` or `split_and_dividend_adjusted`. Symbols and three-letter currency labels are normalized to uppercase. The timezone is a user-declared UTC or IANA-style label, without timezone lookup or conversion. See [the CSV contract](../data/README.md) for strict row validation.
+
+`POST /api/datasets/import` returns HTTP 201 for a new import or 200 for an identical retry. Its `dataset` includes `id`, `origin`, name/source/symbol/currency/timezone/adjustment declarations, interval/session settings, `kind`/`interval_kind`, row count, first/last timestamps, warnings, `original_sha256`, `dataset_sha256` and `created_at`. The import ID derives from metadata and canonical CSV bytes. Original text formatting changes can produce a distinct import because the original fingerprint is part of provenance, even if canonical bytes match. The registry and canonical snapshots are immutable; there is no update/delete API. Every run captures its `dataset_info`, also included in result provenance, so later selection cannot relabel an earlier run.
+
+`original_sha256` fingerprints the UTF-8 CSV text submitted to the route. `dataset_sha256` fingerprints the normalized CSV actually given to the engine. Header aliases, timestamp spellings, numeric formatting and line endings are normalized without filling gaps or adjusting prices. Raw and canonical CSV are each limited to 8 MiB and at most 100,000 data rows; the enclosing import JSON has a separate 12 MiB limit. A database allows 50 imports, while run submissions retain their 32 KiB JSON limit. Imports do not initiate a backtest automatically through the API.
+
+Imported runs use the declared symbol. For opening VWAP, the service supplies the imported interval/session settings and rejects conflicting overrides; daily imports cannot select opening VWAP. The currency is a display/accounting label for a single nominal currency, not an FX conversion. The service does not verify exchange holidays, early closes, missing whole sessions, DST handling or corporate actions. Extended-hours and zero-volume observations remain in the snapshot with warnings; incomplete observed regular sessions can prevent VWAP trend warm-up.
+
 ## Saved-run chart
 
-The chart route reads the immutable input snapshot and the completed result's `effective_config`; it never reads the current source CSV or updates accounting history. The response includes the run ID, dataset SHA-256, explicit synthetic-data flag, symbol, interval, available sessions, selected session, opening window, EMA periods, OHLCV bars, and matching saved fills/rejections. Intraday views default to the first BUY session, or the latest available session when no BUY exists. An optional session must be a valid available `YYYY-MM-DD` date within the saved run's active date range.
+The chart route reads the immutable input snapshot, saved `dataset_info` and completed result's `effective_config`; it never reads the current source CSV or updates accounting history. The response includes the run ID, dataset SHA-256, `dataset_info`, declared `origin`, `synthetic` flag, symbol/currency/timezone, interval, available sessions, selected session, opening window, EMA periods, OHLCV bars, and matching saved fills/rejections. Imported cadence and session hours come from metadata; an active VWAP run must agree with its saved configuration. Intraday views default to the first BUY session, or the latest available session when no BUY exists. An optional session must be a valid available `YYYY-MM-DD` date within the saved run's active date range.
 
-Session VWAP uses cumulative typical price `(high + low + close) / 3` weighted by volume and resets each session. The three EMA overlays use the saved VWAP strategy periods, an arithmetic-mean seed, and all prior regular-session closes, including warm-up history before the run's start date. Unready EMA values and VWAP without positive session volume are `null`. These overlays explain the saved data and do not rerun trading decisions. Daily datasets return their active date range with reference EMA overlays, `interval_minutes: null`, `session: null`, no session list, and `vwap: null`.
+Session VWAP uses cumulative typical price `(high + low + close) / 3` weighted by volume and resets each session. It includes only declared regular-session bars and is `null` outside those hours. The three reference EMA overlays use the saved VWAP periods and an arithmetic-mean seed. For active VWAP, chart candles and EMA history contain only regular-session bars; SMA/EMA/RSI charts retain all observed bars, including extended hours, and use that full history for their reference EMAs. Earlier warm-up history is included before slicing the view. Unready EMAs and VWAP without positive regular-session volume are `null`. These overlays explain the data without rerunning saved trading decisions. Daily datasets return reference EMAs, `interval_minutes: null`, `session: null`, no session list, and `vwap: null`.
 
 Responses contain at most 1,000 candles, with `total_bars` and `truncated` identifying a capped view. Indicator warm-up is calculated before this view is trimmed. Intraday timestamps and chart times remain exchange-local bar-start times. The terminal-style browser interface uses these returned candles and saved fills, with session selection and the opening window visible beside the strategy controls. Both bundled datasets remain synthetic research examples.
+
+`regular_session_only` identifies the chart's bar scope. `indicator_scope.ema` is `regular_session_bars` or `all_observed_bars`; `indicator_scope.vwap` is `regular_session_only` or `not_applicable`. Each candle has `regular_session: true/false` (daily: `null`), and `outside_session_bar_count` counts extended-hours candles in the returned view. Non-VWAP views preserve early/late saved fills, including dates containing only extended-hours observations.
 
 ## Transaction and recovery boundary
 
@@ -80,18 +95,19 @@ Events preserve simulation timestamps from the engine. API `created_at` and `upd
 ```text
 python -m unittest discover -s tests -p test_service.py -v
 python -m unittest discover -s tests -p test_chart_data.py -v
+python -m unittest discover -s tests -p test_import_data.py -v
 python scripts/recovery_demo.py --engine build/bin/trading_bot.exe
 ```
 
 The service tests cover concurrent submissions and claims, changed-payload conflicts, stale owners, lease expiry, cancellation orderings, immutable history, partial-exit basis replay, intentional accounting corruption, bounded abandoned retries, HTTP validation, and actual child-process termination before and after transaction commit. When the executable is built, an additional integration test runs and reconciles a real C++ backtest. Set `TRADING_BOT_ENGINE` for a nonstandard build location. That integration test explicitly reports a skip if the executable is unavailable; CTest supplies the built executable.
 
-The separately registered `chart_data` CTest suite covers session VWAP resets, zero-volume observations, saved EMA periods and prior-history seeding, causal projections, saved-fill selection, daily handling, bounded views, active-date selection, immutable snapshot use, and chart query validation.
+Seven CTest suites are required: engine, strategies, config, service, CLI, chart data and imports. The `chart_data` suite covers causal overlays, saved metadata and snapshots, imported cadence/session settings, extended-hours fill/history preservation, daily handling, bounded views and query validation. `import_data` covers strict CSV/metadata validation, bounds and data-quality warnings. These tests use controlled fixtures; they do not validate market authenticity or real-market strategy performance.
 
 The recovery demonstration uses the actual C++ engine and an actual Python worker subprocess. The worker deliberately calls `os._exit` immediately before commit (91) or immediately after commit (92), before returning success. The script reopens SQLite, repeats the identical submission, restarts the worker, checks one publication and unique fill/event identities, and replays the portfolio. For the precommit case only, it advances the dead worker's lease to expired in the test database rather than waiting 90 seconds. It asserts that the fixture actually creates fills. This is deterministic crash injection, not a power-failure or filesystem-corruption test.
 
 ## Limits and deferred scope
 
-The service allows 16 concurrent HTTP connections, request bodies up to 32 KiB, preset CSV snapshots up to 8 MiB, engine result files up to 64 MiB, 50 queued/running jobs, and 1,000 total runs per database. Results and events are returned as complete documents. The HTTP connection timeout is 10 seconds, database busy timeout is 15 seconds, and engine timeout is 60 seconds. Capital is limited to 1 through 100,000,000 currency units by the API. The CLI supports a broader documented range. Numeric settings must be finite and satisfy the API bounds; the engine validates cross-field relationships.
+The service allows 16 concurrent HTTP connections, 32 KiB run requests, 12 MiB import requests, 8 MiB CSV snapshots, 100,000 rows per import, 50 imports, 50 queued/running jobs, and 1,000 total runs per database. Engine result files are independently limited to 64 MiB: an accepted import can still produce an oversized report, requiring a smaller backtest date range or input file. Results and events are returned as complete documents. The HTTP connection timeout is 10 seconds, database busy timeout is 15 seconds, and engine timeout is 60 seconds. Capital is limited to 1 through 100,000,000 currency units by the API. The CLI supports a broader documented range. Numeric settings must be finite and satisfy the API bounds; the engine validates cross-field relationships.
 
 SQLite WAL with `synchronous=FULL` is appropriate for this single-machine demo. This is not a public multiuser service: there is no authentication or tenant boundary, network filesystem support, automatic retention, migration framework, resumable event pagination, or production operations claim. The history is immutable through the application, not protected against a privileged database owner. Back up the database with SQLite's backup mechanism; do not copy only the main file while writes are active and assume the WAL is included.
 

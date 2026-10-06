@@ -10,6 +10,8 @@ import sqlite3
 import time
 import uuid
 
+from .validation import MAX_DATASET_BYTES, MAX_IMPORTED_DATASETS, dataset_bytes as preset_bytes, preset_info
+
 
 class Conflict(ValueError):
     pass
@@ -134,6 +136,12 @@ class Store:
                 CREATE TABLE IF NOT EXISTS datasets (
                     sha256 TEXT PRIMARY KEY, content BLOB NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS imported_datasets (
+                    id TEXT PRIMARY KEY,
+                    dataset_sha256 TEXT NOT NULL REFERENCES datasets(sha256),
+                    metadata TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE,
                     payload TEXT NOT NULL, payload_hash TEXT NOT NULL,
@@ -143,7 +151,7 @@ class Store:
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     attempt INTEGER NOT NULL DEFAULT 0,
                     claim_token TEXT, lease_until REAL, error TEXT,
-                    engine_seconds REAL
+                    engine_seconds REAL, dataset_info TEXT
                 );
                 CREATE INDEX IF NOT EXISTS runnable ON runs(status,lease_until,created_at);
                 CREATE TABLE IF NOT EXISTS results (
@@ -168,16 +176,80 @@ class Store:
                     BEGIN SELECT RAISE(ABORT,'dataset snapshots are immutable'); END;
                 CREATE TRIGGER IF NOT EXISTS immutable_datasets_delete BEFORE DELETE ON datasets
                     BEGIN SELECT RAISE(ABORT,'dataset snapshots are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS immutable_imports_update BEFORE UPDATE ON imported_datasets
+                    BEGIN SELECT RAISE(ABORT,'import metadata is immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS immutable_imports_delete BEFORE DELETE ON imported_datasets
+                    BEGIN SELECT RAISE(ABORT,'import metadata is immutable'); END;
             """)
+            # Additive migration preserves all earlier run/result/event documents.
+            # Serialize the inspection with ALTER: another startup must not act
+            # on a stale missing-column snapshot after the first startup adds it.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
+            if "dataset_info" not in columns:
+                db.execute("ALTER TABLE runs ADD COLUMN dataset_info TEXT")
+            db.commit()
+
+    @staticmethod
+    def import_public(row):
+        if row is None:
+            raise NotFound("imported dataset not found")
+        return {**json.loads(row["metadata"]), "id": row["id"],
+                "dataset_sha256": row["dataset_sha256"], "created_at": row["created_at"]}
+
+    def import_dataset(self, metadata, content):
+        if not isinstance(content, bytes) or not 0 < len(content) <= MAX_DATASET_BYTES:
+            raise ValueError("canonical dataset must be nonempty and at most 8 MiB")
+        if not isinstance(metadata, dict) or metadata.get("origin") != "imported":
+            raise ValueError("validated imported dataset metadata required")
+        metadata_document = canonical(metadata)
+        if len(metadata_document.encode("utf-8")) > 32768:
+            raise ValueError("import metadata exceeds 32 KiB")
+        dataset_digest = hashlib.sha256(content).hexdigest()
+        dataset_id = "import_" + hashlib.sha256(metadata_document.encode("utf-8") + b"\n" + content).hexdigest()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute("SELECT * FROM imported_datasets WHERE id=?", (dataset_id,)).fetchone()
+            if prior:
+                db.commit()
+                return self.import_public(prior), False
+            if db.execute("SELECT COUNT(*) FROM imported_datasets").fetchone()[0] >= MAX_IMPORTED_DATASETS:
+                raise Conflict("imported dataset capacity reached (50 per database)")
+            db.execute("INSERT OR IGNORE INTO datasets VALUES(?,?)", (dataset_digest, content))
+            db.execute("INSERT INTO imported_datasets VALUES(?,?,?,?)",
+                       (dataset_id, dataset_digest, metadata_document, time.time()))
+            row = db.execute("SELECT * FROM imported_datasets WHERE id=?", (dataset_id,)).fetchone()
+            db.commit()
+            return self.import_public(row), True
+
+    def imported_datasets(self):
+        with self.connect() as db:
+            return [self.import_public(row) for row in db.execute("SELECT * FROM imported_datasets ORDER BY created_at,id")]
+
+    def resolve_dataset(self, dataset_id):
+        preset = preset_info(dataset_id)
+        if preset:
+            return preset, preset_bytes(dataset_id)
+        with self.connect() as db:
+            row = db.execute("""SELECT i.*,d.content FROM imported_datasets i
+                JOIN datasets d ON d.sha256=i.dataset_sha256 WHERE i.id=?""", (dataset_id,)).fetchone()
+            metadata = self.import_public(row)
+            content = bytes(row["content"])
+            if hashlib.sha256(content).hexdigest() != row["dataset_sha256"]:
+                raise ValueError("imported dataset snapshot fingerprint mismatch")
+            return metadata, content
 
     @staticmethod
     def public(row):
         if row is None:
             raise NotFound("run not found")
-        return {k: row[k] for k in ("id", "request_id", "dataset", "dataset_sha256", "strategy",
-                                   "status", "created_at", "updated_at", "attempt", "error", "engine_seconds")}
+        result = {k: row[k] for k in ("id", "request_id", "dataset", "dataset_sha256", "strategy",
+                                      "status", "created_at", "updated_at", "attempt", "error", "engine_seconds")}
+        info = row["dataset_info"] if "dataset_info" in row.keys() else None
+        result["dataset_info"] = json.loads(info) if info else preset_info(row["dataset"])
+        return result
 
-    def submit(self, payload, dataset_bytes):
+    def submit(self, payload, dataset_bytes, dataset_info=None):
         request_id = payload["request_id"]
         body = canonical({k: v for k, v in payload.items() if k != "request_id"})
         digest = hashlib.sha256(body.encode()).hexdigest()
@@ -195,13 +267,20 @@ class Store:
             total = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             if active >= MAX_ACTIVE_RUNS or total >= MAX_RUNS:
                 raise Conflict("local run capacity reached; finish pending jobs or start a separate database")
+            if payload["dataset"].startswith("import_"):
+                imported = db.execute("SELECT * FROM imported_datasets WHERE id=?", (payload["dataset"],)).fetchone()
+                dataset_info = self.import_public(imported)
+                if imported["dataset_sha256"] != dataset_digest:
+                    raise ValueError("run dataset does not match the immutable import")
+            else:
+                dataset_info = preset_info(payload["dataset"]) or dataset_info or {}
             run_id = uuid.uuid4().hex
             db.execute("INSERT OR IGNORE INTO datasets VALUES(?,?)", (dataset_digest, dataset_bytes))
             db.execute("""INSERT INTO runs
-                (id,request_id,payload,payload_hash,dataset,dataset_sha256,strategy,status,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,'queued',?,?)""",
+                (id,request_id,payload,payload_hash,dataset,dataset_sha256,strategy,status,created_at,updated_at,dataset_info)
+                VALUES(?,?,?,?,?,?,?,'queued',?,?,?)""",
                        (run_id, request_id, body, digest, payload["dataset"], dataset_digest,
-                        payload["strategy"], now, now))
+                        payload["strategy"], now, now, canonical(dataset_info)))
             row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
             db.commit()
             return self.public(row), True
@@ -260,6 +339,7 @@ class Store:
         result = dict(result)
         result["provenance"] = {"run_id": claim["id"], "dataset": claim["dataset"],
                                 "dataset_sha256": claim["dataset_sha256"],
+                                "dataset_info": self.public(claim)["dataset_info"],
                                 "request_sha256": claim["payload_hash"],
                                 "reconciliation": reconciliation}
         document = canonical(result)

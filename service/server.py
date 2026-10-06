@@ -1,4 +1,4 @@
-"""Local-only HTTP interface; preset datasets and no arbitrary file access."""
+"""Local-only HTTP interface; validated dataset imports and no arbitrary paths."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, unquote, parse_qs
 
 from .chart_data import chart_for_run
 from .store import Store, Conflict, NotFound, canonical
-from .validation import ROOT, MAX_BODY_BYTES, catalog, dataset_bytes, validate_request
+from .validation import ROOT, MAX_BODY_BYTES, MAX_IMPORT_BODY_BYTES, catalog, validate_request
 from .worker import find_engine, worker_loop
 
 
@@ -73,7 +73,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def request_json(self):
+    def request_json(self, max_bytes=MAX_BODY_BYTES):
         if self.headers.get("Transfer-Encoding"):
             raise ValueError("chunked requests are unsupported")
         if self.headers.get_content_type() != "application/json":
@@ -82,12 +82,12 @@ class Handler(BaseHTTPRequestHandler):
         if len(values) != 1 or not re.fullmatch(r"[0-9]{1,8}", values[0]):
             raise ValueError("one valid Content-Length header required")
         length = int(values[0])
-        if not 0 < length <= MAX_BODY_BYTES:
+        if not 0 < length <= max_bytes:
             # Drain a bounded small overrun so Windows can deliver the error
             # response without resetting a socket with unread request bytes.
-            if 0 < length <= MAX_BODY_BYTES * 2:
+            if 0 < length <= min(max_bytes * 2, 64 * 1024):
                 self.rfile.read(length)
-            raise ValueError("request body exceeds the 32 KiB limit or is empty")
+            raise ValueError(f"request body exceeds the {max_bytes} byte limit or is empty")
         body = self.rfile.read(length)
         if len(body) != length:
             raise ValueError("incomplete request body")
@@ -106,13 +106,20 @@ class Handler(BaseHTTPRequestHandler):
             self.guard()
             path = urlsplit(self.path).path
             if method == "GET" and path == "/api/catalog":
-                return self.send_json(200, catalog())
+                return self.send_json(200, catalog(self.server.store.imported_datasets()))
+            if method == "POST" and path == "/api/datasets/import":
+                from .import_data import validate_import
+                metadata, content = validate_import(self.request_json(MAX_IMPORT_BODY_BYTES))
+                dataset, created = self.server.store.import_dataset(metadata, content)
+                return self.send_json(201 if created else 200, {"dataset": dataset, "created": created})
             if path == "/api/runs":
                 if method == "GET":
                     return self.send_json(200, {"runs": self.server.store.list()})
                 if method == "POST":
-                    payload = validate_request(self.request_json())
-                    run, created = self.server.store.submit(payload, dataset_bytes(payload["dataset"]))
+                    imported = {entry["id"]: entry for entry in self.server.store.imported_datasets()}
+                    payload = validate_request(self.request_json(), extra_datasets=imported)
+                    metadata, content = self.server.store.resolve_dataset(payload["dataset"])
+                    run, created = self.server.store.submit(payload, content, dataset_info=metadata)
                     return self.send_json(201 if created else 200, {"run": run, "created": created})
             match = re.fullmatch(r"/api/runs/([a-f0-9]{32})(?:/(result|events|cancel|reconcile|chart))?", path)
             if match:
