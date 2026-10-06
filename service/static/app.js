@@ -63,6 +63,7 @@ const providerConnection=new ProviderConnection({api,onDataset:async data=>{
   if(data?.id)datasetLibrary.highlight=data.id;
   await datasetLibrary.refresh();
 }});
+$('optional-provider').addEventListener('toggle',()=>{if($('optional-provider').open)providerConnection.refresh();});
 
 function parameterInputs() {
   const strategy=$('strategy').value;
@@ -271,7 +272,6 @@ async function refreshHistory(){
 }
 async function boot(){
   parameterInputs();
-  providerConnection.refresh();
   const initialFormRevision=formRevision;
   showWorkspace(workspaceFromHash(),false);
   try{

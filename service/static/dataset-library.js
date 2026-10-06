@@ -18,10 +18,13 @@ export class DatasetLibrary {
   }
   updateFormatHelp(){
     const tradingview=$('import-format').value==='tradingview';
+    const source=$('import-source'),suggested=tradingview?'TradingView export (user-supplied)':'';
+    if(!source.value.trim()||source.value===this.suggestedSource)source.value=suggested;
+    this.suggestedSource=suggested;
     $('timezone-hint').textContent=tradingview?'Unix seconds and timestamps with a UTC offset are converted to this exchange time zone. Timestamps without an offset must already be local.':'Use the zone of your timestamps, such as America/New_York. Times must already be local; they are not converted.';
     const guide=$('csv-format-guide');guide.replaceChildren();
     if(tradingview){
-      guide.append(element('p','Use TradingView’s Export chart data CSV for one symbol and the selected candle interval.'),element('pre','time,open,high,low,close,Volume'),element('p','These columns may be in any order. Extra indicator columns are listed as ignored and are not used by the strategy.'),element('p','Unix seconds and ISO timestamps with a UTC offset are converted to the declared exchange time zone. Date-only daily candles keep their calendar date.'));
+      guide.append(element('p','Use TradingView’s Download chart data CSV for one symbol and the selected candle interval.'),element('pre','time,open,high,low,close,Volume'),element('p','These columns may be in any order. Extra indicator columns are listed as ignored and are not used by the strategy.'),element('p','Unix seconds and ISO timestamps with a UTC offset are converted to the declared exchange time zone. Date-only daily candles keep their calendar date.'));
     }else{
       guide.append(element('p','Use these six columns, with the oldest candle first.'),element('pre','timestamp,open,high,low,close,volume'),element('p','Intraday timestamps mark the start of each candle in exchange-local time:'),element('code','2026-01-05 09:30:00'),element('p','Daily candles use:'),element('code','2026-01-05'));
     }
