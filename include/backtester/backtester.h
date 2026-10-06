@@ -4,6 +4,7 @@
 #include "strategy/strategy.h"
 #include "risk/risk_manager.h"
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,6 +18,20 @@ struct Trade {
 struct OrderRejection {
     std::string timestamp, action, reason;
     std::string signal_timestamp;
+};
+struct StrategyDiagnosticsSummary {
+    bool available = false;
+    // In-range counts only. Warmup bars are reported separately, never mixed in.
+    std::size_t observed_bars = 0, evaluated_bars = 0, warmup_bars = 0;
+    std::size_t opening_bars = 0, intraday_ready_opening_bars = 0;
+    std::size_t trend_ready_opening_bars = 0, ready_opening_bars = 0;
+    std::size_t long_signals = 0, short_signals = 0, bars_with_open_position = 0;
+    std::map<std::string, std::size_t> hold_reasons, opening_hold_reasons;
+    std::string first_evaluated_timestamp, last_evaluated_timestamp, first_ready_timestamp;
+    std::string last_regular_timestamp;
+    bool last_bar_regular_session = false;
+    // The actual final strategy state may include indicator history from warmup.
+    VWAPDiagnostics last_diagnostics;
 };
 struct BacktestResults {
     double total_return = 0;
@@ -34,6 +49,7 @@ struct BacktestResults {
     std::vector<LedgerEvent> events;
     std::vector<double> equity_curve;
     std::vector<std::string> equity_timestamps;
+    StrategyDiagnosticsSummary strategy_diagnostics;
 };
 struct BacktestConfig {
     double initial_capital = 100000, commission_rate = 0.001, commission_fixed = 0, slippage = 0.0001;

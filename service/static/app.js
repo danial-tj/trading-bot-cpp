@@ -2,6 +2,8 @@
 import {MarketChart} from './market-chart.js';
 import {DarkSelect} from './dark-select.js';
 import {DatasetLibrary,intervalLabel,originLabel} from './dataset-library.js';
+import {ProviderConnection} from './provider-connection.js';
+import {dateRangeError} from './date-fields.js';
 const $ = id => document.getElementById(id);
 const menuControls=[['session-select','Chart session',true],['strategy','Strategy model'],['dataset','Dataset'],['activity-filter','Show activity']].map(([id,label,searchable])=>new DarkSelect($(id),{label,searchable}));
 const syncMenus=()=>menuControls.forEach(control=>control.sync());
@@ -57,6 +59,10 @@ const datasetLibrary=new DatasetLibrary({api,onCatalog:updateCatalog,onSelect:da
   $('dataset').value=data.id;updateDatasetNote();syncMenus();markEdited();showWorkspace('workbench');
   $('dataset-trigger').focus();
 }});
+const providerConnection=new ProviderConnection({api,onDataset:async data=>{
+  if(data?.id)datasetLibrary.highlight=data.id;
+  await datasetLibrary.refresh();
+}});
 
 function parameterInputs() {
   const strategy=$('strategy').value;
@@ -85,7 +91,7 @@ function renderRuleSteps(){
   $('rule-steps').replaceChildren(...rows[strategy].map(([label,value])=>{const row=node('li');row.append(node('span',label,'rule-label'),node('span',value,'rule-value'));return row;}));
 }
 function syncWindow(){for(const button of document.querySelectorAll('[data-window]')){const selected=button.dataset.window===$('window').value;button.setAttribute('aria-checked',String(selected));button.tabIndex=selected?0:-1;}}
-function clearValidation(){for(const input of $('run-form').querySelectorAll('[aria-invalid=true]')){input.removeAttribute('aria-invalid');input.removeAttribute('aria-describedby');}}
+function clearValidation(){for(const input of $('run-form').querySelectorAll('[aria-invalid=true]')){input.removeAttribute('aria-invalid');if(['start-date','end-date'].includes(input.id))input.setAttribute('aria-describedby','evaluation-hint');else input.removeAttribute('aria-describedby');}}
 function markEdited(){clearValidation();error('','form-error');formRevision++;$('setup-state').textContent='Edited · not run';$('setup-state').classList.add('edited');renderRuleSteps();}
 function setSubmitting(active){submitting=active;$('run-button').disabled=active;document.querySelector('.inspector-run').disabled=active;$('run-button').textContent=active?'Saving run…':'Run backtest';}
 function showWorkspace(name,updateHash=true){
@@ -99,12 +105,17 @@ function requestPayload(){
   const strategy=$('strategy').value,params={};
   for(const [key] of parameterSets[strategy]) params[key]=Number($('param-'+key).value);
   if(strategy==='VWAP_OPENING')params.opening_window_minutes=Number($('window').value);
-  return {dataset:$('dataset').value,strategy,config:{backtesting:{initial_capital:Number($('capital').value),commission_rate:Number($('commission').value)/100,slippage:Number($('slippage').value)/10000},risk_management:{max_position_size:Number($('allocation').value)/100,stop_loss_pct:Number($('stop').value)/100,take_profit_pct:Number($('profit').value)/100},strategies:{[strategy]:params}}};
+  const backtesting={initial_capital:Number($('capital').value),commission_rate:Number($('commission').value)/100,slippage:Number($('slippage').value)/10000};
+  if($('start-date').value.trim())backtesting.start_date=$('start-date').value.trim();
+  if($('end-date').value.trim())backtesting.end_date=$('end-date').value.trim();
+  return {dataset:$('dataset').value,strategy,config:{backtesting,risk_management:{max_position_size:Number($('allocation').value)/100,stop_loss_pct:Number($('stop').value)/100,take_profit_pct:Number($('profit').value)/100},strategies:{[strategy]:params}}};
 }
 async function submit(event){
   event.preventDefault();if(submitting)return;error('','form-error');clearValidation();
   const invalid=$('run-form').querySelector(':invalid');
   if(invalid){const details=invalid.closest('details');if(details)details.open=true;error(invalid.validationMessage,'form-error');invalid.setAttribute('aria-invalid','true');invalid.setAttribute('aria-describedby','form-error');invalid.focus();return;}
+  const dateIssue=dateRangeError($('start-date').value.trim(),$('end-date').value.trim());
+  if(dateIssue){const input=$(dateIssue.field+'-date');input.closest('details').open=true;error(dateIssue.message,'form-error');input.setAttribute('aria-invalid','true');input.setAttribute('aria-describedby','evaluation-hint form-error');input.focus();return;}
   const payload=requestPayload();
   if(payload.strategy==='VWAP_OPENING'&&!datasetInfo(payload.dataset).bar_minutes){error('Opening VWAP needs intraday candles. Choose an intraday dataset, or use a crossover or RSI strategy for daily prices.','form-error');const trigger=$('dataset-trigger');trigger.setAttribute('aria-invalid','true');trigger.setAttribute('aria-describedby','form-error');trigger.focus();return;}
   const signature=JSON.stringify(payload);
@@ -156,6 +167,7 @@ function renderResult(){
   if(formRevision===loadingFormRevision)loadSavedSetup();
   $('result-subtitle').textContent=runContext(selectedRun)+(report.strategy==='VWAP_OPENING'?' · '+report.effective_config.strategies.VWAP_OPENING.opening_window_minutes+' min entry window':'');
   renderDatasetDetails(selectedRun.dataset_info||datasetInfo(selectedRun.dataset));
+  renderDiagnostics();
   $('equity').textContent=money(r.final_equity);
   const change=r.final_equity-r.initial_cash_cents/100;
   $('net-change').textContent=(change>=0?'+':'')+money(change)+' from start';
@@ -171,6 +183,27 @@ function renderResult(){
   $('provenance').textContent=JSON.stringify({run_id:selectedRun.id,engine_version:report.engine_version,engine_commit:report.engine_commit,engine_source_sha256:report.engine_source_sha256,dataset_fingerprint:report.dataset_fingerprint,dataset_sha256:selectedRun.dataset_sha256,dataset_info:selectedRun.dataset_info,effective_config:report.effective_config},null,2);
   $('assumptions').replaceChildren(...(report.assumptions||[]).map(value=>node('li',value)));
   if(report.benchmark)$('benchmark-note').textContent=report.benchmark.assumption;
+}
+function renderDiagnostics(){
+  const section=$('strategy-diagnostics');section.hidden=report.strategy!=='VWAP_OPENING';if(section.hidden)return;
+  const d=report.results.strategy_diagnostics,config=report.effective_config.backtesting;
+  $('evaluation-range').textContent=(config.start_date||'First date')+' → '+(config.end_date||'Last date');
+  $('diagnostics-counts').replaceChildren();$('diagnostics-holds').replaceChildren();$('diagnostics-reasons').hidden=!d;
+  if(!d){$('diagnostics-summary').textContent='This saved run predates signal diagnostics. Run it again to review indicator readiness and held candles.';$('diagnostics-note').textContent='The saved result and accounting history are unchanged.';return;}
+  let summary;
+  if(!d.opening_bars)summary='No eligible opening candles were evaluated in this date range.';
+  else if(!d.ready_opening_bars)summary='The opening candles did not have enough prior indicator history. Include more earlier sessions to warm up the intraday, weekly and monthly EMAs.';
+  else if(!d.long_signals&&!d.short_signals)summary='Indicator history was ready for '+num(d.ready_opening_bars)+' opening candles. None matched all the entry rules.';
+  else if(!d.long_signals)summary='The rules identified bearish setups only. These are recorded, but this simulator does not execute short sales.';
+  else if(!report.results.total_trades)summary='The strategy produced buy signals, but no order filled. Review Unfilled signals in the Trades tab for the execution or risk reason.';
+  else summary='The strategy produced '+num(d.long_signals)+' buy signals and '+num(d.short_signals)+' bearish signals. Review the Trades tab for fills and unfilled signals.';
+  $('diagnostics-summary').textContent=summary;
+  const counts=[['Opening candles',d.opening_bars],['History ready',d.ready_opening_bars],['Buy signals',d.long_signals],['Bearish signals',d.short_signals],['Prior warm-up bars',d.warmup_bars]];
+  $('diagnostics-counts').replaceChildren(...counts.map(([label,value])=>{const row=node('div');row.append(node('dt',label),node('dd',num(value)));return row;}));
+  const reasons=Object.entries(d.opening_hold_reasons||{}).sort((a,b)=>b[1]-a[1]);$('diagnostics-reasons').hidden=!reasons.length;
+  $('diagnostics-holds').replaceChildren(...reasons.map(([label,value])=>{const row=node('div');row.append(node('dt',label),node('dd',num(value)));return row;}));
+  const last=d.last_diagnostics;
+  $('diagnostics-note').textContent='History ready means enough indicator history; it does not mean the entry rules matched. Signal counts are before risk and execution checks.'+(last?' Last regular-session bar: '+(d.last_regular_timestamp||'none')+' · completed weeks '+num(last.weekly_completed_bars)+' / months '+num(last.monthly_completed_bars)+'.':'');
 }
 function svgNode(tag,attrs={},text){const el=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [key,value] of Object.entries(attrs))el.setAttribute(key,String(value));if(text!=null)el.textContent=text;return el;}
 // Preserve bucket extrema when reducing long curves for rendering; exports contain every bar.
@@ -238,6 +271,7 @@ async function refreshHistory(){
 }
 async function boot(){
   parameterInputs();
+  providerConnection.refresh();
   const initialFormRevision=formRevision;
   showWorkspace(workspaceFromHash(),false);
   try{
@@ -262,6 +296,7 @@ function loadSavedSetup(){
   syncWindow();renderRuleSteps();$('setup-state').textContent='Saved settings';$('setup-state').classList.remove('edited');
   const amounts={capital:config.backtesting.initial_capital,commission:config.backtesting.commission_rate*100,slippage:config.backtesting.slippage*10000,allocation:config.risk_management.max_position_size*100,stop:config.risk_management.stop_loss_pct*100,profit:config.risk_management.take_profit_pct*100};
   for(const [id,value] of Object.entries(amounts))$(id).value=Number(value.toFixed(8));
+  $('start-date').value=config.backtesting.start_date||'';$('end-date').value=config.backtesting.end_date||'';
   $('dataset').dispatchEvent(new Event('change'));syncMenus();
 }
 function inspectPrice({bar,change,changePercent,source}){

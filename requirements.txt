@@ -1,0 +1,2 @@
+# IANA time zones are required for historical market timestamps on Windows.
+tzdata==2026.5

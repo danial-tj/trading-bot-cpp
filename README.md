@@ -2,13 +2,14 @@
 
 A reproducible local research app for inspecting strategy signals, simulated fills, fees and portfolio balances. C++17 handles market data, indicators, risk and fixed-point accounting. A Python standard-library service saves runs and immutable activity in SQLite. The browser provides an integrated dark workspace for candlesticks, volume, VWAP/EMA overlays, saved fill markers, performance curves and a buy-and-hold comparison.
 
-**Release 2.0 is an offline simulator.** The bundled data is synthetic. Broker execution, borrowed-share short execution and options are not implemented. Bearish VWAP setups are recorded as unfilled research signals. A backtest is not evidence of a durable trading advantage.
+**Release 2.0 runs local simulations.** Historical inputs can come from bundled synthetic data, CSV files or an optional read-only Questrade download. Broker execution, borrowed-share short execution and options are not implemented. Bearish VWAP setups are recorded as unfilled research signals. A backtest is not evidence of a durable trading advantage.
 
 ## Start on Windows
 
-Requires CMake 3.16+, Visual Studio 2022 Build Tools with the C++ workload, and Python 3.9+. The old MinGW GCC 6.3 installation is insufficient for the C++17 standard-library features used here. The JSON dependency is vendored and builds need no downloads or API keys.
+Requires CMake 3.16+, Visual Studio 2022 Build Tools with the C++ workload, and Python 3.9+. The old MinGW GCC 6.3 installation is insufficient for the C++17 standard-library features used here. The C++ JSON dependency is vendored. Install the pinned Python timezone data for historical timestamp conversion; the simulator itself needs no API keys.
 
 ```powershell
+python -m pip install -r requirements.txt
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --parallel 4
 ctest --test-dir build -C Release --output-on-failure --no-tests=error
@@ -19,17 +20,20 @@ Open http://127.0.0.1:8765. The interface loads a reproducible VWAP sample on it
 
 Select a session to inspect its saved candles. Toggle the overlay labels, switch between candles and a closing-price line, or use Opening window / Full session and the pan/zoom controls. Arrow keys inspect candles, Home/End select the first/last bar, and dragging pans the chart. Overview, Trades and Run details expose performance, unfilled signals, export and balance verification. Selecting a saved run restores its setup as the starting point for a new run; edits made while it loads are preserved.
 
-Use **Data → Import CSV** to add one symbol's historical OHLCV file. Supply its source, symbol, exchange-local timezone, price currency, adjustment status, candle interval and regular-session hours. **Validate & import** saves a local immutable dataset; review its warnings, then select it for a simulation. The two synthetic examples remain available. Imported means user-provided: authenticity, licensing and market accuracy are not independently verified, and no prices are downloaded or streamed.
+Use **Data → Import CSV** to add one symbol's historical OHLCV file. Choose **Standard OHLCV** or **TradingView export**, then supply its source, symbol, exchange timezone, currency, adjustment status, candle interval and session hours. **Validate & import** saves a local immutable dataset; review its warnings, then select it for a simulation. TradingView's [Export chart data](https://www.tradingview.com/support/solutions/43000537255-how-to-export-chart-data/) CSV is supported directly: extra indicator columns are listed as ignored, and Unix-second/offset-aware timestamps are converted into the declared exchange timezone. This is a file import, not a TradingView data API or subscription connection. Source authenticity is not independently verified.
+
+The **Questrade** section in Data can connect using your API refresh token, search for a symbol and download a bounded historical date range into the same immutable library. Credentials stay in local process memory; disconnect or restarting the service clears that connection. Only one historical job runs at a time, with cancellation available. No account balances, orders or live streaming are used. The actual user-authorized Questrade connection and data entitlement have not been verified with real credentials in this working session.
 
 Imports accept UTF-8 CSV up to **8 MiB and 100,000 rows**, with at most **50 imported datasets** per database. Daily data supports SMA, EMA and RSI; opening VWAP requires fixed-minute intraday history. See [data format and provenance](data/README.md) for exact bounds and timestamp rules. Large imports can exceed the worker's separate 64 MiB result limit; use a smaller backtest date range if needed.
 
-The design uses black/charcoal surfaces, self-hosted Manrope, compact toolbars and a docked strategy inspector. Thin rules organize the chart and results without rounded dashboard cards or an oversized page header. TradingView informed the chart workflow; the portfolio toolkit and [21st.dev Trade Journal Table](https://21st.dev/@ssychui/components/trade-journal-table) informed the hierarchy and journal. See [DESIGN.md](DESIGN.md) for the applied references and interaction contract. Everything runs locally; no provider account or connection is implied.
+The design uses black/charcoal surfaces, self-hosted Manrope, compact toolbars and a docked strategy inspector. Thin rules organize the chart and results without rounded dashboard cards or an oversized page header. TradingView informed the chart workflow; the portfolio toolkit and [21st.dev Trade Journal Table](https://21st.dev/@ssychui/components/trade-journal-table) informed the hierarchy and journal. See [DESIGN.md](DESIGN.md) for the applied references and interaction contract. Simulation and storage remain local; provider access happens only through the explicit Questrade connection workflow.
 
 ## Start on Linux
 
 Requires a C++17 compiler and standard library (GCC 11+ or Clang with a recent standard library recommended), CMake and Python 3.9+.
 
 ```sh
+python3 -m pip install -r requirements.txt
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure --no-tests=error
@@ -63,6 +67,8 @@ The requested setup is a **strong candle within the first 15 or 30 minutes**, al
 
 Read the exact [strategy specification](docs/VWAP_STRATEGY.md), including timestamp semantics, thresholds, warmup and calendar limitations. The existing SMA, EMA and RSI strategies remain independently selectable. All strategies execute after a completed signal bar, at the next observed open with configured costs.
 
+Set evaluation start/end dates to test a period while retaining earlier imported history for indicator warm-up. Opening VWAP results now include readiness counts, first-ready timing and recorded HOLD reasons, so a zero-trade run can be distinguished from insufficient history or blocked entry conditions. Readiness means enough indicator history, not a buy signal or approved trade.
+
 ## What is verified
 
 - Checked integer-cent cash, fees, cost basis and realized profit, with whole shares; no unavailable-cash spending or excess selling.
@@ -70,7 +76,7 @@ Read the exact [strategy specification](docs/VWAP_STRATEGY.md), including timest
 - Run state resets, future candles cannot influence previous opening fills, and errors remain distinguishable from zero-trade results.
 - Persistent request idempotency, payload-conflict rejection, worker leases/generations, transactional immutable publication, cancellation and independent replay of accounting history.
 - Real subprocess crash tests before commit and after commit/before acknowledgement. Retried jobs do not publish duplicate results or duplicate accounting events.
-- Seven mandatory CTest suites: engine, strategies, config/integration, service/recovery, CLI, immutable chart data and CSV imports. Tests do not disappear in Release builds or when Google Test is absent. Optional chart geometry checks run with `node tests/test_chart_frontend.mjs`. Import verification uses controlled fixtures; it does not establish real-market-data performance.
+- Mandatory CTest discovery covers the engine, strategies, configuration/integration, service/recovery, CLI, immutable chart data, CSV adapters and provider workflow. Tests do not disappear in Release builds or when Google Test is absent. Optional chart geometry checks run with `node tests/test_chart_frontend.mjs`. Import/provider verification uses controlled fixtures; it does not establish real-market-data performance or a successful credentialed Questrade session.
 
 See [engineering decisions](docs/DECISIONS.md), [service/API and recovery](docs/SERVICE.md), [local verification record](docs/PROGRESS.md), and [data provenance](data/README.md). Some old root-level example tests/docs remain for history and are not the release test suite.
 
@@ -89,8 +95,8 @@ For supported GCC/Clang builds, `-DENABLE_SANITIZERS=ON` enables AddressSanitize
 
 ## Limits of this release
 
-Each simulation has its own portfolio. There is no shared-account order reservation service, partial market fills, options pricing, brokerage adapter, live trading, public authentication, exchange calendar, corporate-action processing or real market data subscription. VWAP uses OHLCV typical-price approximation and assumes complete regular sessions in exchange-local time. Execution assumes the next quoted open is available, with no liquidity/participation model.
+Each simulation has its own portfolio. There is no shared-account order reservation service, partial market fills, options pricing, brokerage execution adapter, live trading, public authentication, exchange calendar, corporate-action processing or market-data subscription purchase. The Questrade adapter is limited to historical prices available to the connected user. VWAP uses OHLCV typical-price approximation and assumes complete regular sessions in exchange-local time. Execution assumes the next quoted open is available, with no liquidity/participation model.
 
-The imported currency code labels one nominal simulation currency; it performs no FX conversion or account-currency reconciliation. The declared timezone labels timestamps already in exchange-local time; no timezone/DST conversion occurs. Session hours are fixed within each dataset, with no overnight sessions, holiday/half-day calendar or automatic corporate-action adjustments. Buy-and-hold uses the full available balance, while a strategy may use a smaller allocation. Stops are close-based decisions and can execute beyond their thresholds after a gap. Unsupported annualized/Sharpe metrics are null rather than fabricated zero values.
+The imported currency code labels one nominal simulation currency; it performs no FX conversion or account-currency reconciliation. Standard CSV timestamps must already be exchange-local. TradingView Unix-second/offset-aware timestamps and provider timestamps are normalized before simulation; ambiguous naive TradingView DST times are rejected. Session hours are fixed within each dataset, with no overnight sessions, holiday/half-day calendar or automatic corporate-action adjustments. Buy-and-hold uses the full available balance, while a strategy may use a smaller allocation. Stops are close-based decisions and can execute beyond their thresholds after a gap. Unsupported annualized/Sharpe metrics are null rather than fabricated zero values.
 
-The old network adapter code is excluded from the release build. Its previous TLS/cache implementation requires separate repair and verification before any reuse. No credentials or user accounts are required for the finished local workflow.
+The old C++ network adapter code remains excluded from the release build. The new bounded Python historical-data workflow is separate. Credentials are optional and required only for the explicit Questrade connection; bundled examples and CSV simulations work without accounts.

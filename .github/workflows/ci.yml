@@ -12,7 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Configure
+      - name: Install time zone data
+        run: python -m pip install -r requirements.txt
+      - name: Configure build
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release --parallel 2
@@ -22,6 +24,11 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
       - name: Actual worker crash recovery
         run: python scripts/recovery_demo.py
+      - name: Frontend logic checks
+        run: |
+          node tests/test_chart_frontend.mjs
+          node tests/test_date_fields.mjs
+          node tests/test_provider_frontend.mjs
   sanitizers:
     runs-on: ubuntu-latest
     steps:

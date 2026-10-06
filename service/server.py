@@ -12,6 +12,7 @@ import threading
 from urllib.parse import urlsplit, unquote, parse_qs
 
 from .chart_data import chart_for_run
+from .provider_jobs import ProviderJobs
 from .store import Store, Conflict, NotFound, canonical
 from .validation import ROOT, MAX_BODY_BYTES, MAX_IMPORT_BODY_BYTES, catalog, validate_request
 from .worker import find_engine, worker_loop
@@ -21,11 +22,16 @@ class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, store, static=None):
+    def __init__(self, address, store, static=None, questrade_client=None):
         self.store = store
+        self.provider_jobs = ProviderJobs(store, questrade_client)
         self.static = (static or ROOT / "service" / "static").resolve()
         self.capacity = threading.BoundedSemaphore(16)
         super().__init__(address, Handler)
+
+    def server_close(self):
+        self.provider_jobs.shutdown()
+        super().server_close()
 
     def process_request(self, request, client_address):
         if not self.capacity.acquire(blocking=False):
@@ -52,6 +58,13 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(10)
 
     def log_message(self, format, *args):
+        if self.path.startswith("/api/providers/questrade"):
+            # Never log provider query strings or arbitrary request-path values.
+            route = urlsplit(self.path).path.rsplit("/", 1)[-1]
+            if route not in {"status", "connect", "disconnect", "symbols", "import", "cancel"}:
+                route = "unknown"
+            logging.getLogger("trading_service.http").info("%s Questrade %s", self.command, route)
+            return
         logging.getLogger("trading_service.http").info(format, *args)
 
     def guard(self):
@@ -105,11 +118,42 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.guard()
             path = urlsplit(self.path).path
+            if path.startswith("/api/providers/questrade/"):
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                jobs = self.server.provider_jobs
+                if path != "/api/providers/questrade/symbols" and query:
+                    raise ValueError("this provider endpoint does not accept query parameters")
+                if method == "GET" and path == "/api/providers/questrade/status":
+                    return self.send_json(200, jobs.status())
+                if method == "POST" and path == "/api/providers/questrade/connect":
+                    return self.send_json(200, {"connection": jobs.connect(self.request_json())})
+                if method == "POST" and path == "/api/providers/questrade/disconnect":
+                    return self.send_json(200, {"connection": jobs.disconnect(self.request_json())})
+                if method == "GET" and path == "/api/providers/questrade/symbols":
+                    if set(query) != {"prefix"} or len(query["prefix"]) != 1:
+                        raise ValueError("symbols accepts exactly one prefix parameter")
+                    return self.send_json(200, {"symbols": jobs.search_symbols(query["prefix"][0])})
+                if method == "POST" and path == "/api/providers/questrade/import":
+                    job, created = jobs.start(self.request_json())
+                    return self.send_json(202 if created else 200, {"job": job})
+                if method == "POST" and path == "/api/providers/questrade/cancel":
+                    return self.send_json(200, {"job": jobs.cancel(self.request_json())})
+                raise NotFound("provider route not found")
             if method == "GET" and path == "/api/catalog":
                 return self.send_json(200, catalog(self.server.store.imported_datasets()))
             if method == "POST" and path == "/api/datasets/import":
                 from .import_data import validate_import
-                metadata, content = validate_import(self.request_json(MAX_IMPORT_BODY_BYTES))
+                payload = self.request_json(MAX_IMPORT_BODY_BYTES)
+                if not isinstance(payload, dict):
+                    raise ValueError("import payload must be an object")
+                import_format = payload.pop("format", "standard")
+                if import_format not in ("standard", "tradingview"):
+                    raise ValueError("format must be standard or tradingview")
+                if import_format == "tradingview":
+                    from .tradingview import validate_tradingview_import
+                    metadata, content = validate_tradingview_import(payload)
+                else:
+                    metadata, content = validate_import(payload)
                 dataset, created = self.server.store.import_dataset(metadata, content)
                 return self.send_json(201 if created else 200, {"dataset": dataset, "created": created})
             if path == "/api/runs":

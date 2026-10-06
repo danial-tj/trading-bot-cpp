@@ -1,4 +1,5 @@
 #include "backtester/backtester.h"
+#include "configuration.h"
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +68,36 @@ BacktestResults run(std::vector<MarketData> records, std::vector<TradingSignal> 
     auto risk = std::make_shared<RiskManager>(); require(risk->initialize(p), "risk init");
     Backtester engine; require(engine.initialize(c), "engine init");
     return engine.run_backtest(std::make_shared<ScriptStrategy>(signals), parser, risk);
+}
+std::vector<MarketData> vwap_history(bool bearish = false) {
+    // Four deliberately sparse observed months, each with a complete tiny test
+    // session. These fixtures test the documented observed-bar rules, not calendars.
+    std::vector<MarketData> records;
+    for (int month = 1; month <= 4; ++month) {
+        for (int step = 0; step < 4; ++step) {
+            const double price = bearish ? 200 - month * 10 - step * .2 : 100 + month * 10 + step * .2;
+            records.push_back(bar("2025-0" + std::to_string(month) + "-02T09:3" + std::to_string(step * 2),
+                                  price, price + (bearish ? -.1 : .1)));
+        }
+    }
+    return records;
+}
+std::shared_ptr<VWAPOpeningStrategy> diagnostic_strategy(double min_move_bps = 10000) {
+    auto strategy = std::make_shared<VWAPOpeningStrategy>();
+    auto p = strategy->get_parameters();
+    p["fast_ema"] = 2; p["medium_ema"] = 3; p["slow_ema"] = 4; p["trend_ema_period"] = 1;
+    p["session_close_minute"] = 578; p["opening_window_minutes"] = 6; p["exit_buffer_minutes"] = 2;
+    p["min_move_bps"] = min_move_bps;
+    require(strategy->initialize(p), "diagnostic fixture initialization");
+    return strategy;
+}
+BacktestResults run_vwap(const std::vector<MarketData>& records, BacktestConfig c = config(),
+                        std::shared_ptr<VWAPOpeningStrategy> strategy = diagnostic_strategy()) {
+    auto parser = std::make_shared<CSVParser>();
+    require(parser->load_records(records), parser->get_last_error());
+    auto risk = std::make_shared<RiskManager>(); require(risk->initialize(permissive_risk()), "risk initialization");
+    Backtester engine; require(engine.initialize(c), "engine initialization");
+    return engine.run_backtest(strategy, parser, risk);
 }
 }
 int main() {
@@ -346,6 +377,85 @@ try {
             require(cash == e.cash_after_cents && quantity == e.quantity_after, "event balance");
         }
         require(cash == r.final_cash_cents && quantity == r.final_quantity, "final reconciliation");
+    });
+    test("VWAP diagnostics identify zero fills from insufficient indicator history", [] {
+        auto history = vwap_history(); history.resize(4);
+        const auto r = run_vwap(history);
+        const auto& d = r.strategy_diagnostics;
+        require(r.trades.empty() && d.available, "zero-fill VWAP run has diagnostics");
+        require(d.observed_bars == 4 && d.evaluated_bars == 4 && d.opening_bars == 2, "evaluation counts");
+        require(d.warmup_bars == 0 && d.ready_opening_bars == 0 && d.trend_ready_opening_bars == 0, "insufficient history");
+        require(d.first_ready_timestamp.empty(), "no fabricated readiness timestamp");
+        require(d.opening_hold_reasons.at("Intraday EMA warmup: need slow_ema regular-session bars") == 2, "actual HOLD reason captured");
+        const auto json = results_to_json(r).at("strategy_diagnostics");
+        require(json.at("first_ready_timestamp").is_null(), "unavailable timestamp serializes to null");
+        require(json.at("last_diagnostics").at("trend_ready") == false, "last actual readiness serialized");
+    });
+    test("VWAP history readiness is distinct from matching candle filters", [] {
+        auto c = config(); c.start_date = c.end_date = "2025-04-02";
+        const auto r = run_vwap(vwap_history(), c);
+        const auto& d = r.strategy_diagnostics;
+        require(r.trades.empty() && d.ready_opening_bars == 2, "ready history can still have no fills");
+        require(d.intraday_ready_opening_bars == 2 && d.trend_ready_opening_bars == 2, "independent readiness counts");
+        require(d.long_signals == 0 && d.short_signals == 0, "no signals from failing candle-strength filter");
+        require(d.opening_hold_reasons.at("Candle body is not strong enough") == 1 &&
+                d.opening_hold_reasons.at("Need prior positive-volume session VWAP to measure direction") == 1,
+                "actual candle and prior-VWAP filter reasons retained");
+        require(d.first_ready_timestamp == "2025-04-02T09:30:00", "ready timestamp uses the completed candle's start label");
+    });
+    test("VWAP warmup feeds indicators without entering evaluation diagnostic counts", [] {
+        auto c = config(); c.start_date = c.end_date = "2025-04-02";
+        const auto r = run_vwap(vwap_history(), c);
+        const auto& d = r.strategy_diagnostics;
+        require(d.warmup_bars == 12 && d.observed_bars == 4 && d.evaluated_bars == 4, "prior-date bars counted separately");
+        require(d.opening_bars == 2 && d.last_diagnostics.intraday_bars == 16, "actual strategy state retains warmed history");
+        std::size_t holds = 0;
+        for (const auto& item : d.hold_reasons) holds += item.second;
+        require(holds == 4, "warmup HOLD reasons are excluded");
+        require(d.first_evaluated_timestamp == "2025-04-02T09:30:00" && d.last_evaluated_timestamp == "2025-04-02T09:36:00", "evaluation bounds preserved");
+    });
+    test("VWAP observations distinguish extended hours from evaluated regular bars", [] {
+        auto history = vwap_history();
+        history.push_back(bar("2025-04-02T09:38", 150, 150));
+        auto c = config(); c.start_date = c.end_date = "2025-04-02";
+        const auto r = run_vwap(history, c);
+        const auto& d = r.strategy_diagnostics;
+        require(d.observed_bars == 5 && d.evaluated_bars == 4 && d.opening_bars == 2, "extended bar does not increase readiness denominator");
+        require(!d.last_bar_regular_session && d.last_regular_timestamp == "2025-04-02T09:36:00", "last regular state explicitly labeled");
+        require(d.last_evaluated_timestamp == "2025-04-02T09:38:00" && d.last_diagnostics.reason == "Outside configured regular session", "snapshot comes from actual last call");
+    });
+    test("VWAP diagnostics count signals separately from rejected risk orders", [] {
+        auto c = config(1); c.start_date = c.end_date = "2025-04-02";
+        const auto r = run_vwap(vwap_history(), c, diagnostic_strategy(0));
+        require(r.trades.empty() && r.strategy_diagnostics.long_signals == 1, "generated opportunity survived diagnostic capture");
+        require(r.rejections.size() == 1 && r.rejections[0].action == "BUY", "insufficient-size risk outcome remains separate");
+        require(r.strategy_diagnostics.bars_with_open_position == 0, "no unfilled position exposure invented");
+    });
+    test("VWAP diagnostics preserve bearish research signals without claiming short fills", [] {
+        auto c = config(); c.start_date = c.end_date = "2025-04-02";
+        const auto r = run_vwap(vwap_history(true), c, diagnostic_strategy(0));
+        require(r.trades.empty() && r.strategy_diagnostics.short_signals == 1 && r.strategy_diagnostics.long_signals == 0, "short signal counted");
+        require(r.rejections.size() == 1 && r.rejections[0].action == "SHORT", "unsupported short outcome is explicit");
+    });
+    test("VWAP diagnostic counts and final snapshots reset between repeated runs", [] {
+        auto strategy = diagnostic_strategy();
+        auto c = config(); c.start_date = c.end_date = "2025-04-02";
+        const auto first = results_to_json(run_vwap(vwap_history(), c, strategy)).at("strategy_diagnostics");
+        (void)run_vwap(vwap_history(true), config(20000), strategy);
+        const auto repeated = results_to_json(run_vwap(vwap_history(), c, strategy)).at("strategy_diagnostics");
+        require(first == repeated, "no diagnostics state leaks between runs");
+    });
+    test("diagnostics exclude future bars beyond the requested evaluation end", [] {
+        auto history = vwap_history();
+        auto c = config(); c.start_date = c.end_date = "2025-03-02";
+        const auto first = results_to_json(run_vwap(history, c)).at("strategy_diagnostics");
+        for (std::size_t i = 12; i < history.size(); ++i) history[i] = bar(history[i].timestamp, 999, 1000);
+        const auto second = results_to_json(run_vwap(history, c)).at("strategy_diagnostics");
+        require(first == second && first.at("observed_bars") == 4, "future OHLC data does not affect saved diagnostics");
+    });
+    test("non-VWAP result diagnostics are explicitly unavailable in JSON", [] {
+        const auto r = run({bar("2025-01-01")}, {});
+        require(!r.strategy_diagnostics.available && results_to_json(r).at("strategy_diagnostics").is_null(), "not fabricated for other strategies");
     });
     std::cout << passed << " engine cases passed\n";
     return 0;

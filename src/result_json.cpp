@@ -16,7 +16,38 @@ Json results_to_json(const BacktestResults& r) {
         {"final_equity_cents",r.final_equity_cents}, {"cost_basis_cents",r.cost_basis_cents},
         {"realized_pnl_cents",r.realized_pnl_cents}, {"unrealized_pnl_cents",r.unrealized_pnl_cents},
         {"total_fees_cents",r.total_fees_cents}, {"equity_curve",r.equity_curve}, {"equity_timestamps",r.equity_timestamps},
-        {"trades",Json::array()}, {"rejections",Json::array()}, {"events",Json::array()}};
+        {"trades",Json::array()}, {"rejections",Json::array()}, {"events",Json::array()},
+        {"strategy_diagnostics",nullptr}};
+    if (r.strategy_diagnostics.available) {
+        const auto& d = r.strategy_diagnostics;
+        const auto& last = d.last_diagnostics;
+        auto timestamp = [](const std::string& value) -> Json { return value.empty() ? Json(nullptr) : Json(value); };
+        out["strategy_diagnostics"] = {
+            {"strategy","VWAP_OPENING"}, {"scope","evaluation bars; prior-date warmup is counted separately"},
+            {"readiness_definition","Enough indicator history only. Matching trend directions, candle filters, existing exposure, prior entry attempts and risk approval are separate conditions."},
+            {"timestamp_convention","exchange-local bar starts; diagnostics observed after that bar completes"},
+            {"observed_bars",d.observed_bars}, {"evaluated_bars",d.evaluated_bars}, {"warmup_bars",d.warmup_bars},
+            {"opening_bars",d.opening_bars}, {"intraday_ready_opening_bars",d.intraday_ready_opening_bars},
+            {"trend_ready_opening_bars",d.trend_ready_opening_bars}, {"ready_opening_bars",d.ready_opening_bars},
+            {"long_signals",d.long_signals}, {"short_signals",d.short_signals},
+            {"bars_with_open_position",d.bars_with_open_position},
+            {"hold_reasons",d.hold_reasons}, {"opening_hold_reasons",d.opening_hold_reasons},
+            {"first_evaluated_timestamp",timestamp(d.first_evaluated_timestamp)},
+            {"last_evaluated_timestamp",timestamp(d.last_evaluated_timestamp)},
+            {"first_ready_timestamp",timestamp(d.first_ready_timestamp)},
+            {"last_regular_timestamp",timestamp(d.last_regular_timestamp)},
+            {"last_bar_regular_session",d.last_bar_regular_session},
+            {"last_diagnostics", {
+                {"session_date",timestamp(last.session_date)}, {"reason",last.reason},
+                {"session_vwap",optional_number(last.session_vwap)}, {"previous_vwap",optional_number(last.previous_vwap)},
+                {"fast_ema",optional_number(last.fast_ema)}, {"medium_ema",optional_number(last.medium_ema)},
+                {"slow_ema",optional_number(last.slow_ema)}, {"weekly_direction",last.weekly_direction},
+                {"monthly_direction",last.monthly_direction}, {"weekly_completed_bars",last.weekly_completed_bars},
+                {"monthly_completed_bars",last.monthly_completed_bars}, {"intraday_bars",last.intraday_bars},
+                {"session_bars",last.session_bars}, {"intraday_ready",last.intraday_ready}, {"trend_ready",last.trend_ready}
+            }}
+        };
+    }
     for (const auto& t : r.trades) out["trades"].push_back({{"timestamp",t.timestamp}, {"signal_timestamp",t.signal_timestamp},
         {"action",t.action}, {"reason",t.reason}, {"price",t.price}, {"quantity",t.quantity}, {"commission",t.commission},
         {"pnl",t.pnl}, {"slippage",t.slippage}, {"cash_after",t.cash_after}, {"position_after",t.position_after}});

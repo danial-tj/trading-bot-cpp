@@ -48,6 +48,8 @@ BacktestResults Backtester::run_backtest(std::shared_ptr<Strategy> strategy,
     if (!initialize(config_)) throw std::invalid_argument("invalid backtest configuration");
     const auto parameters = strategy->get_parameters();
     if (!strategy->initialize(parameters)) throw std::invalid_argument("strategy initialization failed");
+    const auto vwap_strategy = std::dynamic_pointer_cast<VWAPOpeningStrategy>(strategy);
+    results_.strategy_diagnostics.available = static_cast<bool>(vwap_strategy);
     size_t first = 0;
     while (first < parser->get_data_count() && !config_.start_date.empty() && parser->get_data(first).session_date < config_.start_date) ++first;
     if (first == parser->get_data_count() || (!config_.end_date.empty() && parser->get_data(first).session_date > config_.end_date))
@@ -90,11 +92,50 @@ BacktestResults Backtester::run_backtest(std::shared_ptr<Strategy> strategy,
             throw std::runtime_error("strategy " + strategy->get_name() + " failed at " + bar.timestamp + ": " + error.what());
         }
     };
+    auto record_diagnostics = [&](const MarketData& bar, const TradingSignal& raw_signal) {
+        if (!vwap_strategy) return;
+        auto& summary = results_.strategy_diagnostics;
+        const auto& state = vwap_strategy->diagnostics();
+        ++summary.observed_bars;
+        if (summary.first_evaluated_timestamp.empty()) summary.first_evaluated_timestamp = bar.timestamp;
+        summary.last_evaluated_timestamp = bar.timestamp;
+        const int open = static_cast<int>(parameters.at("session_open_minute"));
+        const int close = static_cast<int>(parameters.at("session_close_minute"));
+        const int completion = bar.minute_of_day + static_cast<int>(parameters.at("bar_minutes"));
+        const bool regular = bar.is_intraday && bar.minute_of_day >= open && completion <= close;
+        // Readiness is available indicator history, independent of candle/trend
+        // alignment, existing exposure, an earlier entry attempt or risk rejection.
+        const bool opening = regular && completion < open + parameters.at("opening_window_minutes") &&
+            completion < close - parameters.at("exit_buffer_minutes");
+        summary.last_bar_regular_session = regular;
+        summary.last_diagnostics = state;
+        if (regular) { ++summary.evaluated_bars; summary.last_regular_timestamp = bar.timestamp; }
+        if (opening) {
+            ++summary.opening_bars;
+            if (state.intraday_ready) ++summary.intraday_ready_opening_bars;
+            if (state.trend_ready) ++summary.trend_ready_opening_bars;
+            if (state.intraday_ready && state.trend_ready) {
+                ++summary.ready_opening_bars;
+                if (summary.first_ready_timestamp.empty()) summary.first_ready_timestamp = bar.timestamp;
+            }
+        }
+        if (position.quantity > 0) ++summary.bars_with_open_position;
+        if (raw_signal.type == SignalType::BUY) ++summary.long_signals;
+        else if (raw_signal.type == SignalType::SHORT) ++summary.short_signals;
+        else if (raw_signal.type == SignalType::HOLD) {
+            ++summary.hold_reasons[raw_signal.reason];
+            if (opening) ++summary.opening_hold_reasons[raw_signal.reason];
+        }
+    };
 
     for (size_t i = 0; i < parser->get_data_count(); ++i) {
         const auto& bar = parser->get_data(i);
         if (!config_.end_date.empty() && bar.session_date > config_.end_date) break;
-        if (i < first) { (void)generated(bar); continue; }
+        if (i < first) {
+            (void)generated(bar);
+            if (vwap_strategy) ++results_.strategy_diagnostics.warmup_bars;
+            continue;
+        }
         if (session != bar.session_date) {
             session = bar.session_date;
             daily_start = last_equity; // Overnight gaps belong to the new trading day.
@@ -174,6 +215,7 @@ BacktestResults Backtester::run_backtest(std::shared_ptr<Strategy> strategy,
         results_.equity_timestamps.push_back(bar.timestamp);
 
         auto signal = generated(bar); // Only this completed bar and older bars are visible.
+        record_diagnostics(bar, signal); // Save actual strategy output before risk overrides.
         signal.timestamp = bar.timestamp;
         const auto closure = risk->closure_reason(position, bar, portfolio);
         if (!closure.empty()) {

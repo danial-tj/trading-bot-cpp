@@ -375,6 +375,16 @@ class StoreTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_evaluation_dates_reject_impossible_or_reversed_ranges(self):
+        base = {"request_id": "dates", "dataset": "opening_demo", "strategy": "VWAP_OPENING"}
+        for dates in ({"start_date": "2025-02-29"}, {"end_date": "2024-04-31"},
+                      {"start_date": "2024-06-01", "end_date": "2024-05-31"}):
+            with self.subTest(dates=dates), self.assertRaises(ValueError):
+                validate_request({**base, "config": {"backtesting": dates}})
+        for dates in ({"start_date": "2024-02-29"}, {"end_date": "2024-05-31"},
+                      {"start_date": "", "end_date": ""}):
+            self.assertEqual(validate_request({**base, "config": {"backtesting": dates}})["config"]["backtesting"], dates)
+
     def test_unsafe_payloads_rejected(self):
         base = {"request_id": "valid", "dataset": "sample", "strategy": "RSI"}
         invalid = [None, [], {**base, "dataset": "../../secrets"}, {**base, "strategy": "x; cmd"},

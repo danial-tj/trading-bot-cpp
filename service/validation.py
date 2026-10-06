@@ -1,5 +1,6 @@
 """Public API accepts bounded configuration and registered dataset IDs only."""
 import copy
+from datetime import date
 import math
 from pathlib import Path
 import re
@@ -59,6 +60,11 @@ def validate_section(name, section):
         elif name == "backtesting" and key in ("start_date", "end_date"):
             if not isinstance(value, str) or (value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)):
                 raise ValueError(f"{key} must use YYYY-MM-DD")
+            if value:
+                try:
+                    date.fromisoformat(value)
+                except ValueError:
+                    raise ValueError(f"{key} must be a valid calendar date") from None
         elif name == "backtesting" and key == "symbol":
             if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,24}", value):
                 raise ValueError("symbol must contain 1-24 letters, digits, dot, underscore, or hyphen")
@@ -83,6 +89,9 @@ def validate_request(payload, extra_datasets=None):
     for section in ("backtesting", "risk_management"):
         if section in config:
             validate_section(section, config[section])
+    dates = config.get("backtesting", {})
+    if dates.get("start_date") and dates.get("end_date") and dates["start_date"] > dates["end_date"]:
+        raise ValueError("start_date must be on or before end_date")
     if "strategies" in config:
         if not isinstance(config["strategies"], dict) or set(config["strategies"]) - set(STRATEGIES):
             raise ValueError("unsupported strategies configuration")
